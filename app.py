@@ -92,21 +92,48 @@ def slugify(title, fallback="test"):
     return s or fallback
 
 
-def show_pdf(path, height=780):
-    """PDF'i tablette hizli acilmasi icin mumkunse dogrudan URL uzerinden
-    gosterir; dosya static klasoru disindaysa base64'e geri doner."""
+def _pdf_src(path):
+    """PDF'i tarayicida gostermek icin kullanilacak 'src' adresini uretir.
+    static/ klasoru altindaysa dogrudan URL (hizli, buyuk dosyalarda
+    guvenilir); degilse (orn. gizli orijinal PDF'ler) base64 gomme."""
     abs_path = os.path.abspath(path)
     static_root = os.path.abspath(STATIC_DIR) + os.sep
     if abs_path.startswith(static_root):
         rel = os.path.relpath(abs_path, STATIC_DIR).replace(os.sep, "/")
-        src = f"app/static/{quote(rel)}#view=FitH"
-    else:
-        with open(path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-        src = f"data:application/pdf;base64,{b64}#view=FitH"
+        return f"app/static/{quote(rel)}"
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:application/pdf;base64,{b64}"
+
+
+def show_pdf(path, height=780):
+    """PDF'i hem satir ici (iframe) onizleme olarak, hem de -- baz tarayicilar
+    ozellikle tabletlerde iframe icinde PDF gostermeyi reddedebildigi icin --
+    HER ZAMAN calisan 'yeni sekmede ac' baglantisiyla birlikte gosterir."""
+    src = _pdf_src(path)
     st.markdown(
-        f'<iframe src="{src}" '
+        f'<a href="{src}#view=FitH" target="_blank" rel="noopener" '
+        f'style="display:inline-block;margin-bottom:8px;padding:8px 14px;'
+        f'background:#2563EB;color:#fff;border-radius:8px;text-decoration:none;'
+        f'font-weight:600;">📄 PDF\'i yeni sekmede aç</a>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<iframe src="{src}#view=FitH" '
         f'width="100%" height="{height}px" style="border:1px solid #e2e8f0;border-radius:12px;"></iframe>',
+        unsafe_allow_html=True,
+    )
+
+
+def pdf_link_button(path, label="🔓 Orijinal PDF (cevap anahtarlı)"):
+    """Sadece kucuk bir 'yeni sekmede ac' baglantisi dondurur (satir ici
+    onizleme YOK) -- admin panelindeki 'Kayitli Denemeler' listesinde
+    goruntu kirliligi yaratmamasi icin kullanilir."""
+    src = _pdf_src(path)
+    st.markdown(
+        f'<a href="{src}#view=FitH" target="_blank" rel="noopener" '
+        f'title="Cevap anahtarını içeren tam PDF — sadece siz görürsünüz, öğrenciyle paylaşmayın." '
+        f'style="font-size:0.85rem;text-decoration:none;">{label}</a>',
         unsafe_allow_html=True,
     )
 
@@ -264,7 +291,19 @@ with tabs[0]:
         exam = db.get_exam(selected_exam_id)
         structure = exam["structure"]
         answer_key = exam["answer_key"]
-        attempt_no = st.session_state.attempt.get(selected_exam_id, 0)
+        student_name = st.session_state.student_name
+
+        # Bir öğrenci daha önce (belki de başka bir oturumda / cihazda) bu
+        # denemeyi çözmeye başlamış ya da bitirmişse, deneme numarasını
+        # veritabanından öğreniyoruz -- böylece sayfa yeniden açıldığında
+        # sıfırdan boş bir form yerine kaldığı yer / sonuç gösterilir.
+        if selected_exam_id not in st.session_state.attempt:
+            st.session_state.attempt[selected_exam_id] = db.get_current_attempt_no(
+                selected_exam_id, student_name
+            )
+        attempt_no = st.session_state.attempt[selected_exam_id]
+
+        existing_result = db.get_result_for_attempt(selected_exam_id, student_name, attempt_no)
 
         col_pdf, col_form = st.columns([6, 4])
 
@@ -276,49 +315,12 @@ with tabs[0]:
                 st.error("PDF dosyası bulunamadı.")
 
         with col_form:
-            st.subheader("📝 Optik Form")
-            all_subjects = [
-                (section, subject)
-                for section, subjects in structure.items()
-                for subject in subjects
-            ]
-            subject_tabs = st.tabs([s for _, s in all_subjects])
-            user_answers = {section: {} for section in structure}
-
-            with st.form(f"form_{selected_exam_id}_{attempt_no}"):
-                for (section, subject), stab in zip(all_subjects, subject_tabs):
-                    with stab:
-                        count = structure[section][subject]["count"]
-                        answers = []
-                        for i in range(1, count + 1):
-                            ans = st.radio(
-                                f"{subject} - Soru {i}",
-                                ["A", "B", "C", "D", "Boş"],
-                                index=4,
-                                horizontal=True,
-                                key=f"ans_{selected_exam_id}_{attempt_no}_{subject}_{i}",
-                            )
-                            answers.append(ans)
-                        user_answers[section][subject] = answers
-
-                submitted = st.form_submit_button("✅ Sınavı Bitir ve Puanla", type="primary", use_container_width=True)
-
-            if submitted and not st.session_state.student_name:
-                st.error(
-                    "Sonucunuzun kaydedilebilmesi için önce soldaki menüden giriş yapmanız "
-                    "veya hesap oluşturmanız gerekiyor. Giriş yaptıktan sonra sınavı tekrar bitirin."
-                )
-            elif submitted:
-                per_subject, total_net, weighted_score = scoring.score_exam(
-                    user_answers, answer_key, structure
-                )
-                answers_detail = scoring.build_answer_detail(user_answers, answer_key, structure)
-                db.add_result(
-                    selected_exam_id, st.session_state.student_name, per_subject, total_net,
-                    weighted_score, answers_detail=answers_detail,
-                )
-
-                st.success("Sınav tamamlandı! Sonuçlarınız aşağıda ve 'Gelişim Raporum' sekmesinde kaydedildi.")
+            if existing_result:
+                # ---- Bu deneme numarası için sınav zaten bitirilmiş: sonucu göster ----
+                st.success("✅ Bu denemeyi zaten çözdünüz. Sonuçlarınız:")
+                per_subject = existing_result["per_subject"]
+                total_net = existing_result["total_net"]
+                weighted_score = existing_result["weighted_score"]
                 cols = st.columns(len(per_subject))
                 for c, (subj, r) in zip(cols, per_subject.items()):
                     c.metric(subj, f"Net: {r['net']}", f"D:{r['dogru']} Y:{r['yanlis']} B:{r['bos']}")
@@ -331,10 +333,81 @@ with tabs[0]:
                         "MEB'in Türkiye geneli istatistiklerine dayanan resmi 100-500 LGS "
                         "puanı değildir."
                     )
+                st.divider()
+                if st.button(
+                    "🔄 Yeniden Çöz (yeni bir deneme başlat)",
+                    key=f"retry_{selected_exam_id}_{attempt_no}",
+                    use_container_width=True,
+                ):
+                    st.session_state.attempt[selected_exam_id] = attempt_no + 1
+                    st.rerun()
+            else:
+                # ---- Bu deneme numarası henüz bitirilmemiş: formu göster ----
+                st.subheader("📝 Optik Form")
+                if student_name:
+                    st.caption(
+                        "İşaretlediğiniz cevaplar otomatik kaydedilir; sayfa kapanırsa veya "
+                        "internet kesilirse tekrar açtığınızda kaldığınız yerden devam edebilirsiniz."
+                    )
+                else:
+                    st.warning("Sonucunuzun kaydedilmesi için önce soldaki menüden giriş yapın veya hesap oluşturun.")
 
-        if st.button("🔄 Testi Sıfırla / Yeniden Çöz"):
-            st.session_state.attempt[selected_exam_id] = attempt_no + 1
-            st.rerun()
+                saved = db.load_progress(selected_exam_id, student_name, attempt_no) or {}
+
+                all_subjects = [
+                    (section, subject)
+                    for section, subjects in structure.items()
+                    for subject in subjects
+                ]
+                subject_tabs = st.tabs([s for _, s in all_subjects])
+                user_answers = {section: {} for section in structure}
+                options = ["A", "B", "C", "D", "Boş"]
+
+                for (section, subject), stab in zip(all_subjects, subject_tabs):
+                    with stab:
+                        count = structure[section][subject]["count"]
+                        saved_subject = saved.get(section, {}).get(subject, [])
+                        answers = []
+                        for i in range(1, count + 1):
+                            prev = saved_subject[i - 1] if i - 1 < len(saved_subject) else "Boş"
+                            default_index = options.index(prev) if prev in options else 4
+                            ans = st.radio(
+                                f"{subject} - Soru {i}",
+                                options,
+                                index=default_index,
+                                horizontal=True,
+                                key=f"ans_{selected_exam_id}_{attempt_no}_{subject}_{i}",
+                            )
+                            answers.append(ans)
+                        user_answers[section][subject] = answers
+
+                if student_name:
+                    db.save_progress(selected_exam_id, student_name, attempt_no, user_answers)
+
+                submitted = st.button(
+                    "✅ Sınavı Bitir ve Puanla",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"submit_{selected_exam_id}_{attempt_no}",
+                )
+
+                if submitted and not student_name:
+                    st.error(
+                        "Sonucunuzun kaydedilebilmesi için önce soldaki menüden giriş yapmanız "
+                        "veya hesap oluşturmanız gerekiyor. Giriş yaptıktan sonra sınavı tekrar bitirin."
+                    )
+                elif submitted:
+                    per_subject, total_net, weighted_score = scoring.score_exam(
+                        user_answers, answer_key, structure
+                    )
+                    answers_detail = scoring.build_answer_detail(user_answers, answer_key, structure)
+                    db.add_result(
+                        selected_exam_id, student_name, per_subject, total_net,
+                        weighted_score, answers_detail=answers_detail, attempt_no=attempt_no,
+                    )
+                    db.clear_progress(selected_exam_id, student_name, attempt_no)
+                    st.success("Sınav tamamlandı! Sonuçlarınız kaydedildi.")
+                    st.rerun()
 
 
 # ================================================================= TAB: GELİŞİM RAPORU
@@ -649,18 +722,18 @@ if st.session_state.is_admin:
             if not all_exams:
                 st.info("Henüz kayıtlı deneme yok.")
             for e in all_exams:
-                c1, c2, c3 = st.columns([4, 2, 1])
+                c1, c2, c3, c4 = st.columns([4, 2, 1, 2])
                 c1.write(f"**{e['title']}**  ·  {e['category']}  ·  {e['source']}")
                 c2.write(e["created_at"])
                 if c3.button("Sil", key=f"del_{e['id']}"):
                     db.delete_exam(e["id"])
                     st.rerun()
-                if e.get("pdf_path_original") and os.path.exists(e["pdf_path_original"]):
-                    with st.expander(f"🔓 Orijinal PDF'i görüntüle (cevap anahtarı DAHİL — sadece siz görürsünüz)"):
-                        st.warning("Bu, cevap anahtarını içeren tam PDF'tir. Öğrenciyle ekranı paylaşmayın.")
-                        show_pdf(e["pdf_path_original"], height=600)
-                else:
-                    st.caption("Bu deneme için orijinal PDF kaydı yok (eski kayıt ya da elle girilmiş cevap anahtarı).")
+                with c4:
+                    if e.get("pdf_path_original") and os.path.exists(e["pdf_path_original"]):
+                        pdf_link_button(e["pdf_path_original"])
+                    else:
+                        st.caption("Orijinal PDF yok")
+                st.divider()
 
         # ---------------- Öğrenci şifrelerini yönet ----------------
         elif admin_section == "Öğrenci Şifrelerini Yönet":
@@ -732,6 +805,11 @@ if st.session_state.is_admin:
                     for r in results:
                         title = f"{r['created_at']} · {r['exam_title']} ({r['category']}) · Net: {r['total_net']}"
                         with st.expander(title):
+                            # Sonuçları sadece admin, sadece burada silebilir --
+                            # öğrenci tarafında (Gelişim Raporum) hiçbir silme seçeneği yoktur.
+                            if st.button("🗑️ Bu sonucu sil", key=f"del_result_{r['id']}"):
+                                db.delete_result(r["id"])
+                                st.rerun()
                             cols = st.columns(len(r["per_subject"]))
                             for c, (subj, res) in zip(cols, r["per_subject"].items()):
                                 c.metric(subj, f"Net: {res['net']}", f"D:{res['dogru']} Y:{res['yanlis']} B:{res['bos']}")

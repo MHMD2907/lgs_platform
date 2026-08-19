@@ -85,6 +85,20 @@ def init_db():
             created_at TEXT NOT NULL
         )"""
     )
+    # Bir öğrenci bir sınavı bitirmeden ekrandan/uygulamadan ayrılırsa
+    # (internet kesilmesi, tablet kapanması, sayfa yenilenmesi vb.) o ana
+    # kadar işaretlediği cevapları burada tutuyoruz; öğrenci geri döndüğünde
+    # "kaldığı yerden" devam edebiliyor. Sınav bitirilip puanlanınca bu satır silinir.
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS in_progress (
+            exam_id INTEGER NOT NULL,
+            student_name TEXT NOT NULL,
+            attempt_no INTEGER NOT NULL,
+            answers_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (exam_id, student_name, attempt_no)
+        )"""
+    )
     for cat in DEFAULT_CATEGORIES:
         c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
 
@@ -96,6 +110,10 @@ def init_db():
         pass  # sütun zaten var
     try:
         c.execute("ALTER TABLE exams ADD COLUMN pdf_path_original TEXT")
+    except sqlite3.OperationalError:
+        pass  # sütun zaten var
+    try:
+        c.execute("ALTER TABLE results ADD COLUMN attempt_no INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass  # sütun zaten var
 
@@ -386,12 +404,14 @@ def delete_exam(exam_id):
 
 # ---------- results ----------
 
-def add_result(exam_id, student_name, per_subject, total_net, weighted_score, answers_detail=None):
+def add_result(exam_id, student_name, per_subject, total_net, weighted_score, answers_detail=None, attempt_no=0):
+    """Her çağrı YENİ bir satır ekler (üzerine yazmaz) -- böylece aynı öğrenci
+    aynı denemeyi 10 kere çözse bile 10 ayrı sonuç kaydı tutulur."""
     conn = get_conn()
     c = conn.cursor()
     c.execute(
-        """INSERT INTO results (exam_id, student_name, per_subject, total_net, weighted_score, created_at, answers_detail)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO results (exam_id, student_name, per_subject, total_net, weighted_score, created_at, answers_detail, attempt_no)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             exam_id,
             student_name,
@@ -400,12 +420,114 @@ def add_result(exam_id, student_name, per_subject, total_net, weighted_score, an
             weighted_score,
             datetime.now().isoformat(timespec="seconds"),
             json.dumps(answers_detail, ensure_ascii=False) if answers_detail is not None else None,
+            attempt_no,
         ),
     )
     conn.commit()
     result_id = c.lastrowid
     conn.close()
     return result_id
+
+
+def delete_result(result_id):
+    """Bir sonuç kaydını siler. SADECE admin panelinden çağrılmalı --
+    öğrenci arayüzünde bu işlev için hiçbir düğme yoktur."""
+    conn = get_conn()
+    conn.execute("DELETE FROM results WHERE id = ?", (result_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_result_for_attempt(exam_id, student_name, attempt_no):
+    """Belirli bir deneme + öğrenci + deneme-numarası için tamamlanmış
+    (puanlanmış) bir sonuç var mı diye bakar. Varsa döndürür, yoksa None."""
+    if not student_name:
+        return None
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT results.*, exams.title AS exam_title, exams.category AS category
+           FROM results JOIN exams ON results.exam_id = exams.id
+           WHERE results.exam_id = ? AND results.student_name = ? AND results.attempt_no = ?
+           ORDER BY results.created_at DESC LIMIT 1""",
+        (exam_id, student_name, attempt_no),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["per_subject"] = json.loads(d["per_subject"])
+    raw_detail = d.get("answers_detail")
+    d["answers_detail"] = json.loads(raw_detail) if raw_detail else None
+    return d
+
+
+def get_current_attempt_no(exam_id, student_name):
+    """Bir öğrenci bir denemeyi ilk kez mi açıyor, yoksa daha önce (bu
+    tarayıcı oturumu kapansa/İnternet kesilse bile) kaldığı/bıraktığı bir
+    yer mi var diye bakmak için kullanılır. En yüksek deneme-numarasını
+    (tamamlanmış sonuçlar VEYA yarım kalmış "in_progress" kayıtları
+    arasından) döndürür; hiçbiri yoksa 0 döner (ilk deneme)."""
+    if not student_name:
+        return 0
+    conn = get_conn()
+    r1 = conn.execute(
+        "SELECT MAX(attempt_no) AS m FROM results WHERE exam_id = ? AND student_name = ?",
+        (exam_id, student_name),
+    ).fetchone()
+    r2 = conn.execute(
+        "SELECT MAX(attempt_no) AS m FROM in_progress WHERE exam_id = ? AND student_name = ?",
+        (exam_id, student_name),
+    ).fetchone()
+    conn.close()
+    m1 = r1["m"] if r1 and r1["m"] is not None else 0
+    m2 = r2["m"] if r2 and r2["m"] is not None else 0
+    return max(m1, m2)
+
+
+def save_progress(exam_id, student_name, attempt_no, answers):
+    """Öğrencinin o ana kadar işaretlediği cevapları kaydeder (üzerine
+    yazarak); sayfa yenilense/internet kesilse bile 'kaldığı yerden'
+    devam edebilmesi için kullanılır."""
+    if not student_name:
+        return
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO in_progress (exam_id, student_name, attempt_no, answers_json, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(exam_id, student_name, attempt_no)
+           DO UPDATE SET answers_json = excluded.answers_json, updated_at = excluded.updated_at""",
+        (exam_id, student_name, attempt_no, json.dumps(answers, ensure_ascii=False),
+         datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_progress(exam_id, student_name, attempt_no):
+    """Daha önce kaydedilmiş yarım kalmış cevapları döndürür (yoksa None)."""
+    if not student_name:
+        return None
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT answers_json FROM in_progress WHERE exam_id = ? AND student_name = ? AND attempt_no = ?",
+        (exam_id, student_name, attempt_no),
+    ).fetchone()
+    conn.close()
+    return json.loads(row["answers_json"]) if row else None
+
+
+def clear_progress(exam_id, student_name, attempt_no):
+    """Sınav bitirilip puanlandığında, artık gereksiz kalan 'yarım kalmış
+    cevaplar' kaydını siler."""
+    if not student_name:
+        return
+    conn = get_conn()
+    conn.execute(
+        "DELETE FROM in_progress WHERE exam_id = ? AND student_name = ? AND attempt_no = ?",
+        (exam_id, student_name, attempt_no),
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_results(student_name=None, exam_id=None):
