@@ -149,64 +149,61 @@ def _pdf_cache_entry(path):
 
 
 def show_pdf(path, height=780):
-    """PDF'i satir ici onizleme olarak gosterir.
+    """PDF'i gosterir.
 
-    ONEMLI - NEDEN 'Blob URL' KULLANILIYOR (data: URI DEGIL): Onceki
-    denemede iframe'in src'sine dogrudan buyuk bir 'data:application/pdf;
-    base64,...' adresi verilmisti. Bu YANLIS cikti: PDF'i indirip disaridan
-    acmak sorunsuz calisirken (dosyanin kendisi saglam), TARAYICIDA (iframe
-    icinde) hicbir sey gorunmuyordu -- yani sorun dosyada degil, Chrome'un
-    cok buyuk bir 'data:' adresini iframe'e dogrudan yuklerken sessizce
-    basarisiz olmasindaymis. Bunun bilinen/guvenilir cozumu: base64 veriyi
-    tarayicida (JavaScript ile) gercek bir ikili dosyaya ('Blob') cevirip,
-    ondan geçici bir 'blob:' adresi uretmek -- tarayicilar bunu data:
-    adreslerinden cok daha guvenilir isliyor. Bunu calistırmak icin de
-    st.markdown yerine st.components.v1.html kullanmak sart: st.markdown
-    ile eklenen <script> etiketleri TARAYICI TARAFINDAN CALISTIRILMAZ
-    (Streamlit bunu bir HTML parcasi olarak sayfaya "yapistiriyor", kod
-    olarak calistirmiyor); components.html ise gercek, script'lerin
-    calisabildigi bir iframe olusturuyor."""
+    ONEMLI - NEDEN ARTIK INDIRME BUTONU ASIL YONTEM: Sirasiyla denendi --
+    (1) dogrudan 'data:' adresi iframe'e verildi: calismadi (Chrome sessizce
+    engelledi). (2) 'data:' adresi yeni sekmede acildi: Chrome bunu da
+    ACIKCA engelledi ("about:blank#blocked"). (3) base64'u tarayicida
+    JavaScript ile gercek bir dosyaya ('Blob') cevirip iframe'e verildi:
+    bu sefer de Streamlit'in o iframe'i olusturan 'sandbox' korumasi
+    yuzunden yine "Bu sayfa Chrome tarafından engellendi" cikti. Yani
+    PDF'i SAYFANIN ICINE gomerek gostermenin her yolu, buyuk PDF'ler icin
+    tarayici guvenlik kisitlamalarina takiliyor. Buna karsin INDIRME
+    (st.download_button) her seferinde sorunsuz calisti (siz de bunu
+    kendiniz dogruladiniz). Bu yuzden artik ana ve garanti calisan yontem
+    INDIRME; sayfa icinde onizleme sadece "denemek isterseniz" diye
+    opsiyonel, gizli bir sekilde sunuluyor."""
     entry = _pdf_cache_entry(path)
-    frame_id = f"pdf_{abs(hash(path))}"
-    html = f"""
-    <div style="width:100%;">
-      <div id="{frame_id}_loading" style="font-family:sans-serif;color:#64748b;padding:12px;">
-        📄 PDF hazırlanıyor...
-      </div>
-      <iframe id="{frame_id}" style="display:none;width:100%;height:{height}px;
-        border:1px solid #e2e8f0;border-radius:12px;"></iframe>
-    </div>
-    <script>
-      (function() {{
-        try {{
-          var b64 = "{entry['b64']}";
-          var byteChars = atob(b64);
-          var byteNumbers = new Array(byteChars.length);
-          for (var i = 0; i < byteChars.length; i++) {{
-            byteNumbers[i] = byteChars.charCodeAt(i);
-          }}
-          var byteArray = new Uint8Array(byteNumbers);
-          var blob = new Blob([byteArray], {{type: 'application/pdf'}});
-          var url = URL.createObjectURL(blob);
-          var frame = document.getElementById("{frame_id}");
-          frame.src = url + "#view=FitH";
-          frame.style.display = "block";
-          document.getElementById("{frame_id}_loading").style.display = "none";
-        }} catch (e) {{
-          document.getElementById("{frame_id}_loading").innerText =
-            "PDF tarayıcıda gösterilemedi (" + e + "). Aşağıdaki indirme düğmesini kullanın.";
-        }}
-      }})();
-    </script>
-    """
-    components.html(html, height=height + 10, scrolling=True)
     st.download_button(
-        "⬇️ PDF ekranda görünmüyorsa buraya tıklayıp indirin",
+        "⬇️ Kitapçığı İndir ve Görüntüle",
         data=entry["bytes"],
         file_name=os.path.basename(path),
         mime="application/pdf",
+        type="primary",
+        use_container_width=True,
         key=f"dl_{path}",
     )
+    st.caption(
+        "İndirdiğiniz dosyaya tıklayarak (veya tarayıcınızın 'İndirilenler' klasöründen) açabilirsiniz. "
+        "Sayfayı kapatmadan, PDF'i yanınızda açık tutup Optik Form'u aynı anda doldurabilirsiniz."
+    )
+    with st.expander("🔍 Tarayıcı içinde önizlemeyi dene (bazı cihazlarda çalışmayabilir)"):
+        frame_id = f"pdf_{abs(hash(path))}"
+        html = f"""
+        <iframe id="{frame_id}" style="width:100%;height:{height}px;
+          border:1px solid #e2e8f0;border-radius:12px;"></iframe>
+        <script>
+          (function() {{
+            try {{
+              var b64 = "{entry['b64']}";
+              var byteChars = atob(b64);
+              var byteNumbers = new Array(byteChars.length);
+              for (var i = 0; i < byteChars.length; i++) {{
+                byteNumbers[i] = byteChars.charCodeAt(i);
+              }}
+              var byteArray = new Uint8Array(byteNumbers);
+              var blob = new Blob([byteArray], {{type: 'application/pdf'}});
+              var url = URL.createObjectURL(blob);
+              document.getElementById("{frame_id}").src = url + "#view=FitH";
+            }} catch (e) {{
+              document.getElementById("{frame_id}").outerHTML =
+                "<p style='color:#b91c1c;'>Önizleme bu cihazda çalışmadı, yukarıdaki indirme düğmesini kullanın.</p>";
+            }}
+          }})();
+        </script>
+        """
+        components.html(html, height=height + 10, scrolling=True)
 
 
 def pdf_link_button(path, label="🔓 Orijinal PDF (cevap anahtarlı)"):
@@ -274,6 +271,26 @@ if "student_name" not in st.session_state:
 if "student_display_name" not in st.session_state:
     st.session_state.student_display_name = ""  # login sonrası: ekranda gösterilecek ad
 
+# ---------------- Oturum zaman aşımı ----------------
+# Bir cihaz (tablet/bilgisayar) uzun süre açık/etkin bırakılırsa, güvenlik
+# için bir süre sonra oturumu otomatik kapatıp tekrar şifre istiyoruz.
+# Cevaplar ise DB'de (in_progress tablosunda) zaten saklandığı için, tekrar
+# giriş yapıldığında öğrenci kaldığı yerden devam edebiliyor -- hiçbir
+# cevap kaybolmaz, sadece giriş oturumu süresi doluyor.
+SESSION_TIMEOUT_SECONDS = 60 * 60  # 1 saat işlem yapılmazsa otomatik çıkış
+
+if "_last_activity" not in st.session_state:
+    st.session_state._last_activity = datetime.now()
+
+_idle_seconds = (datetime.now() - st.session_state._last_activity).total_seconds()
+if _idle_seconds > SESSION_TIMEOUT_SECONDS and (st.session_state.is_admin or st.session_state.student_name):
+    st.session_state.is_admin = False
+    st.session_state.student_name = ""
+    st.session_state.student_display_name = ""
+    st.session_state["_timeout_notice"] = True
+
+st.session_state._last_activity = datetime.now()
+
 def render_student_login_form():
     # Admin kullanıcı adı kutusu gibi, kayıtlı TEK bir öğrenci varsa (tipik
     # kullanım: tek çocuk) kullanıcı adını otomatik dolduruyoruz; birden
@@ -327,6 +344,13 @@ def render_admin_login_form():
 
 with st.sidebar:
     st.markdown(f"### 📚 {config.APP_TITLE}")
+
+    if st.session_state.pop("_timeout_notice", False):
+        st.warning(
+            f"Uzun süre işlem yapılmadığı için oturumunuz kapatıldı (yaklaşık "
+            f"{SESSION_TIMEOUT_SECONDS // 60} dakika). Cevaplarınız kaydedildi, "
+            f"tekrar giriş yapıp kaldığınız yerden devam edebilirsiniz."
+        )
 
     if not st.session_state.student_name and not st.session_state.is_admin:
         login_type = st.selectbox("Giriş türü", ["Öğrenci", "Yönetici"], key="login_type")
