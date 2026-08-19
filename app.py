@@ -105,7 +105,15 @@ def inject_css():
         """
         <style>
         #MainMenu, footer {visibility: hidden;}
-        .block-container {padding-top: 1.2rem; padding-left: 2rem; padding-right: 2rem; max-width: 100%;}
+        .block-container {padding-top: 3.5rem; padding-left: 2rem; padding-right: 2rem; max-width: 100%;}
+        div[data-baseweb="tab-list"] {
+            overflow-x: visible !important;
+            flex-wrap: wrap;
+        }
+        div[data-baseweb="tab-list"] button[data-baseweb="tab"] {
+            height: auto;
+            white-space: normal;
+        }
         div[data-testid="stMetric"] {
             background: #F1F5F9; border-radius: 14px; padding: 14px 10px;
             box-shadow: 0 1px 3px rgba(0,0,0,0.06);
@@ -344,6 +352,7 @@ if st.session_state.is_admin:
                 "URL'den PDF İndir",
                 "Google Drive'dan İçe Aktar",
                 "Kayıtlı Denemeler",
+                "Öğrenci Şifrelerini Yönet",
             ],
             horizontal=True,
         )
@@ -594,3 +603,31 @@ if st.session_state.is_admin:
                 if c3.button("Sil", key=f"del_{e['id']}"):
                     db.delete_exam(e["id"])
                     st.rerun()
+
+        # ---------------- Öğrenci şifrelerini yönet ----------------
+        elif admin_section == "Öğrenci Şifrelerini Yönet":
+            st.markdown(
+                "Bir öğrenci şifresini unutursa, burada onun için yeni bir şifre "
+                "belirleyebilirsiniz. Öğrenciye sadece yeni şifreyi söylemeniz yeterli."
+            )
+            students = db.get_students()
+            if not students:
+                st.info("Henüz kayıtlı öğrenci yok.")
+            else:
+                for s in students:
+                    with st.expander(f"👤 {s['display_name']}  (kullanıcı adı: {s['username']})"):
+                        new_pw = st.text_input(
+                            "Yeni şifre", type="password", key=f"newpw_{s['username']}"
+                        )
+                        new_pw2 = st.text_input(
+                            "Yeni şifre (tekrar)", type="password", key=f"newpw2_{s['username']}"
+                        )
+                        if st.button("Şifreyi Sıfırla", key=f"resetbtn_{s['username']}"):
+                            if new_pw != new_pw2:
+                                st.error("Girdiğiniz şifreler eşleşmiyor.")
+                            else:
+                                ok, msg = db.reset_student_password(s["username"], new_pw)
+                                if ok:
+                                    st.success(f"{s['display_name']} için şifre güncellendi.")
+                                else:
+                                    st.error(msg)

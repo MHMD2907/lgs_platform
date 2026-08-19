@@ -115,6 +115,40 @@ def create_student(username, display_name, password):
     return True, "Hesap oluşturuldu."
 
 
+def get_students():
+    """Kayıtlı tüm öğrencileri (kullanıcı adı + görünen ad) döner -- admin panelinde listelemek için."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT username, display_name, created_at FROM students ORDER BY display_name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def reset_student_password(username, new_password):
+    """Admin tarafından bir öğrencinin şifresini sıfırlar (öğrenci unutursa)."""
+    username = (username or "").strip().lower().replace(" ", "_")
+    if not username or not new_password:
+        return False, "Kullanıcı adı ve yeni şifre boş olamaz."
+    if len(new_password) < 4:
+        return False, "Şifre en az 4 karakter olmalı."
+    conn = get_conn()
+    exists = conn.execute(
+        "SELECT 1 FROM students WHERE username = ?", (username,)
+    ).fetchone()
+    if not exists:
+        conn.close()
+        return False, "Bu kullanıcı adında bir öğrenci bulunamadı."
+    salt, pw_hash = _hash_password(new_password)
+    conn.execute(
+        "UPDATE students SET salt = ?, password_hash = ? WHERE username = ?",
+        (salt, pw_hash, username),
+    )
+    conn.commit()
+    conn.close()
+    return True, "Şifre güncellendi."
+
+
 def verify_student(username, password):
     """Kullanıcı adı + şifre doğruysa öğrenci kaydını (dict) döner, değilse None."""
     username = (username or "").strip().lower().replace(" ", "_")
