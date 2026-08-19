@@ -19,8 +19,8 @@ from datetime import datetime
 from urllib.parse import quote
 
 import pandas as pd
+import pdfplumber
 import streamlit as st
-import streamlit.components.v1 as components
 
 import bot
 import config
@@ -148,62 +148,115 @@ def _pdf_cache_entry(path):
     return cache[cache_key]
 
 
-def show_pdf(path, height=780):
-    """PDF'i gosterir.
+def _pdf_page_count(path):
+    """Bir PDF'in sayfa sayisini oturum icinde bir kez hesaplayip
+    onbellekte tutar (yol + degisim zamani anahtar)."""
+    stat = os.stat(path)
+    cache_key = f"{path}|{stat.st_mtime_ns}|{stat.st_size}"
+    cache = st.session_state.setdefault("_pdf_pagecount_cache", {})
+    if cache_key not in cache:
+        with pdfplumber.open(path) as pdf:
+            cache.clear()
+            cache[cache_key] = len(pdf.pages)
+    return cache[cache_key]
 
-    ONEMLI - NEDEN ARTIK INDIRME BUTONU ASIL YONTEM: Sirasiyla denendi --
-    (1) dogrudan 'data:' adresi iframe'e verildi: calismadi (Chrome sessizce
-    engelledi). (2) 'data:' adresi yeni sekmede acildi: Chrome bunu da
-    ACIKCA engelledi ("about:blank#blocked"). (3) base64'u tarayicida
-    JavaScript ile gercek bir dosyaya ('Blob') cevirip iframe'e verildi:
-    bu sefer de Streamlit'in o iframe'i olusturan 'sandbox' korumasi
-    yuzunden yine "Bu sayfa Chrome tarafından engellendi" cikti. Yani
-    PDF'i SAYFANIN ICINE gomerek gostermenin her yolu, buyuk PDF'ler icin
-    tarayici guvenlik kisitlamalarina takiliyor. Buna karsin INDIRME
-    (st.download_button) her seferinde sorunsuz calisti (siz de bunu
-    kendiniz dogruladiniz). Bu yuzden artik ana ve garanti calisan yontem
-    INDIRME; sayfa icinde onizleme sadece "denemek isterseniz" diye
-    opsiyonel, gizli bir sekilde sunuluyor."""
+
+def _pdf_page_image(path, page_num, dpi=130):
+    """Bir PDF sayfasini DUZ BIR RESME (JPEG bayt dizisi) cevirip
+    onbellekte tutar.
+
+    ONEMLI - NEDEN RESIM: PDF'i tarayiciya gomup gostermenin denenen HER
+    YOLU (dogrudan 'data:' adresi iframe'e verilmesi, 'data:' adresinin
+    yeni sekmede acilmasi, base64'un JavaScript ile 'Blob'a cevrilip
+    iframe'e verilmesi) tarayici guvenlik kisitlamalarina takildi -- Chrome
+    hepsini "engellendi" diyerek reddetti, hem masaustunde hem telefonda.
+    Duz bir RESIM (JPEG) ise sıradan bir fotoğraf gibi davranır; PDF'e
+    özel HİÇBİR güvenlik kısıtlaması yoktur ve her cihazda çalışır. Bu
+    yuzden her sayfa sunucu tarafinda (pdfplumber/pypdfium2 ile) resme
+    cevrilip st.image() ile gosteriliyor."""
+    stat = os.stat(path)
+    cache_key = f"{path}|{stat.st_mtime_ns}|{page_num}|{dpi}"
+    cache = st.session_state.setdefault("_pdf_page_img_cache", {})
+    if cache_key not in cache:
+        # Bellek şişmesin diye aynı anda en fazla birkaç sayfa tutulur.
+        if len(cache) >= 6:
+            del cache[next(iter(cache))]
+        with pdfplumber.open(path) as pdf:
+            page_img = pdf.pages[page_num].to_image(resolution=dpi)
+            buf = io.BytesIO()
+            page_img.original.convert("RGB").save(buf, format="JPEG", quality=80)
+            cache[cache_key] = buf.getvalue()
+    return cache[cache_key]
+
+
+def show_pdf(path, height=780):
+    """PDF'i SAYFA SAYFA RESIM olarak gosterir; ogrenci 'Onceki/Sonraki'
+    ile gezinir ya da dogrudan sayfa numarasi girer. Boylece PDF'i ve
+    Optik Form'u ayni ekranda, yan yana, disari cikmadan kullanabilir
+    (bkz. _pdf_page_image() ustundeki not: bu, denenen onceki uc yontemin
+    (data: URI, yeni sekme, Blob) hepsinin tarayici tarafindan engellenmesi
+    uzerine bulunan cozum)."""
+    try:
+        page_count = _pdf_page_count(path)
+    except Exception as e:
+        st.error(f"PDF okunamadı: {e}")
+        return
+
+    state_key = f"_pdf_page_{path}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = 0
+    st.session_state[state_key] = max(0, min(st.session_state[state_key], page_count - 1))
+
+    nav1, nav2, nav3 = st.columns([1, 2, 1])
+    with nav1:
+        if st.button("◀ Önceki", key=f"prev_{path}", use_container_width=True,
+                      disabled=st.session_state[state_key] <= 0):
+            st.session_state[state_key] -= 1
+            st.rerun()
+    with nav3:
+        if st.button("Sonraki ▶", key=f"next_{path}", use_container_width=True,
+                      disabled=st.session_state[state_key] >= page_count - 1):
+            st.session_state[state_key] += 1
+            st.rerun()
+    with nav2:
+        # ÖNEMLİ: key'in içine geçerli sayfa numarası eklendi. Aksi halde
+        # Streamlit, "Önceki/Sonraki" ile sayfa değiştiğinde bu widget'ın
+        # ESKİ değerini session_state'te tuttuğu için yeni 'value=' parametresini
+        # YOK SAYAR -- bu da tıklamayı sessizce geri alırdı. Sayfa değiştikçe
+        # anahtar da değiştiği için widget her seferinde temiz/doğru değerle
+        # yeniden oluşturuluyor.
+        new_page = st.number_input(
+            f"Sayfa (1 - {page_count})",
+            min_value=1, max_value=page_count,
+            value=st.session_state[state_key] + 1,
+            key=f"_pdf_jump_{path}_{st.session_state[state_key]}",
+            label_visibility="collapsed",
+        )
+        if new_page - 1 != st.session_state[state_key]:
+            st.session_state[state_key] = new_page - 1
+            st.rerun()
+
+    with st.spinner("Sayfa yükleniyor..."):
+        try:
+            img_bytes = _pdf_page_image(path, st.session_state[state_key])
+        except Exception as e:
+            st.error(f"Sayfa gösterilirken hata oluştu: {e}")
+            return
+
+    with st.container(height=height, border=True):
+        st.image(img_bytes, use_container_width=True)
+
+    st.caption(f"📄 Sayfa {st.session_state[state_key] + 1} / {page_count}")
+
     entry = _pdf_cache_entry(path)
     st.download_button(
-        "⬇️ Kitapçığı İndir ve Görüntüle",
+        "⬇️ Kitapçığın Tamamını İndir",
         data=entry["bytes"],
         file_name=os.path.basename(path),
         mime="application/pdf",
-        type="primary",
         use_container_width=True,
         key=f"dl_{path}",
     )
-    st.caption(
-        "İndirdiğiniz dosyaya tıklayarak (veya tarayıcınızın 'İndirilenler' klasöründen) açabilirsiniz. "
-        "Sayfayı kapatmadan, PDF'i yanınızda açık tutup Optik Form'u aynı anda doldurabilirsiniz."
-    )
-    with st.expander("🔍 Tarayıcı içinde önizlemeyi dene (bazı cihazlarda çalışmayabilir)"):
-        frame_id = f"pdf_{abs(hash(path))}"
-        html = f"""
-        <iframe id="{frame_id}" style="width:100%;height:{height}px;
-          border:1px solid #e2e8f0;border-radius:12px;"></iframe>
-        <script>
-          (function() {{
-            try {{
-              var b64 = "{entry['b64']}";
-              var byteChars = atob(b64);
-              var byteNumbers = new Array(byteChars.length);
-              for (var i = 0; i < byteChars.length; i++) {{
-                byteNumbers[i] = byteChars.charCodeAt(i);
-              }}
-              var byteArray = new Uint8Array(byteNumbers);
-              var blob = new Blob([byteArray], {{type: 'application/pdf'}});
-              var url = URL.createObjectURL(blob);
-              document.getElementById("{frame_id}").src = url + "#view=FitH";
-            }} catch (e) {{
-              document.getElementById("{frame_id}").outerHTML =
-                "<p style='color:#b91c1c;'>Önizleme bu cihazda çalışmadı, yukarıdaki indirme düğmesini kullanın.</p>";
-            }}
-          }})();
-        </script>
-        """
-        components.html(html, height=height + 10, scrolling=True)
 
 
 def pdf_link_button(path, label="🔓 Orijinal PDF (cevap anahtarlı)"):
@@ -492,27 +545,32 @@ with tabs[0]:
                     for section, subjects in structure.items()
                     for subject in subjects
                 ]
-                subject_tabs = st.tabs([s for _, s in all_subjects])
                 user_answers = {section: {} for section in structure}
                 options = ["A", "B", "C", "D", "Boş"]
 
-                for (section, subject), stab in zip(all_subjects, subject_tabs):
-                    with stab:
-                        count = structure[section][subject]["count"]
-                        saved_subject = saved.get(section, {}).get(subject, [])
-                        answers = []
-                        for i in range(1, count + 1):
-                            prev = saved_subject[i - 1] if i - 1 < len(saved_subject) else "Boş"
-                            default_index = options.index(prev) if prev in options else 4
-                            ans = st.radio(
-                                f"{subject} - Soru {i}",
-                                options,
-                                index=default_index,
-                                horizontal=True,
-                                key=f"ans_{selected_exam_id}_{attempt_no}_{subject}_{i}",
-                            )
-                            answers.append(ans)
-                        user_answers[section][subject] = answers
+                # PDF görüntüleyici ile aynı yükseklikte, kaydırılabilir bir
+                # kutu içinde gösteriliyor -- böylece PDF bittiğinde Optik
+                # Form aşağıya doğru uzayıp gitmiyor, ikisi de aynı boyda
+                # kalıp kendi içinde kayıyor.
+                with st.container(height=780, border=True):
+                    subject_tabs = st.tabs([s for _, s in all_subjects])
+                    for (section, subject), stab in zip(all_subjects, subject_tabs):
+                        with stab:
+                            count = structure[section][subject]["count"]
+                            saved_subject = saved.get(section, {}).get(subject, [])
+                            answers = []
+                            for i in range(1, count + 1):
+                                prev = saved_subject[i - 1] if i - 1 < len(saved_subject) else "Boş"
+                                default_index = options.index(prev) if prev in options else 4
+                                ans = st.radio(
+                                    f"{subject} - Soru {i}",
+                                    options,
+                                    index=default_index,
+                                    horizontal=True,
+                                    key=f"ans_{selected_exam_id}_{attempt_no}_{subject}_{i}",
+                                )
+                                answers.append(ans)
+                            user_answers[section][subject] = answers
 
                 if student_name:
                     db.save_progress(selected_exam_id, student_name, attempt_no, user_answers)
