@@ -14,6 +14,7 @@ import base64
 import io
 import os
 import re
+import shutil
 from datetime import datetime
 from urllib.parse import quote
 
@@ -92,62 +93,94 @@ def slugify(title, fallback="test"):
     return s or fallback
 
 
-def _pdf_src(path):
-    """PDF'i tarayicida gostermek icin kullanilacak 'src' adresini uretir.
-    ONEMLI: Streamlit Cloud'da 'static' klasorunu dogrudan URL'den sunma
-    ozelliginin (enableStaticServing) her zaman guvenilir calistigi
-    dogrulanamadigi icin (bos/beyaz sayfa gozlemlendi), HER PDF -- boyutu ne
-    olursa olsun -- guvenilir sekilde calisan base64 gomme yontemiyle
-    gosterilir. Bu, sunucu ayarina bagimli olmadigi icin daha yavas ama
-    daha saglam bir yontemdir.
+def _compression_note(path):
+    """Admin panelinde 'deneme eklendi' mesajının yanına, PDF'in gerçekte
+    ne kadar küçültülüp küçültülemediğini gösteren küçük bir not üretir --
+    böylece 'PDF açılmıyor' sorununu kör kör tahmin etmek yerine, boyutun
+    gerçekten küçülüp küçülmediğini birlikte görebiliyoruz."""
+    try:
+        size_mb = round(os.path.getsize(path) / (1024 * 1024), 1)
+    except OSError:
+        return ""
+    gs_found = shutil.which("gs") is not None
+    if not gs_found:
+        return (
+            f" (⚠️ PDF boyutu: {size_mb} MB — Ghostscript sunucuda bulunamadığı için "
+            f"küçültme YAPILAMADI; bu genelde `packages.txt` dosyası henüz devreye girmediğinde "
+            f"olur, uygulamayı GitHub'dan yeniden dağıtmayı deneyin.)"
+        )
+    if size_mb > 8:
+        return (
+            f" (PDF boyutu: {size_mb} MB — küçültüldü ama yine de büyük kaldı, "
+            f"tablette yüklenmesi biraz zaman alabilir.)"
+        )
+    return f" (PDF boyutu: {size_mb} MB — sisteme küçültülmüş olarak kaydedildi.)"
+
+
+def _pdf_cache_entry(path):
+    """Bir PDF'in ham baytlarini VE tarayicida gostermek icin gereken
+    base64 'data:' adresini oturum icinde bir kez hesaplayip onbellekte
+    tutar (yol + degisim zamani + boyut anahtar olarak).
 
     ONEMLI - PERFORMANS: Ogrenci sinav cozerken her cevap tikladiginda
     sayfa yeniden calisiyor (ilerlemeyi otomatik kaydedebilmek icin). Bu
     yuzden ayni dosyayi HER rerun'da yeniden okuyup base64'e cevirmek
-    (10+ MB'lik bir PDF icin saniyeler surebilir) cok yavas olur. Bu
-    yuzden sonucu, dosya degismedigi surece (yol + degisim zamani + boyut
-    anahtar olarak) oturum icinde ONBELLEKTE tutuyoruz."""
+    (10+ MB'lik bir PDF icin saniyeler surebilir) cok yavas olur.
+
+    ONEMLI - STATIC SERVING KULLANILMIYOR: Streamlit Cloud'da 'static'
+    klasorunu dogrudan URL'den sunma ozelliginin (enableStaticServing)
+    her zaman guvenilir calistigi dogrulanamadigi icin (bos/beyaz sayfa
+    gozlemlendi), HER PDF base64 gomme yontemiyle gosteriliyor."""
     stat = os.stat(path)
     cache_key = f"{path}|{stat.st_mtime_ns}|{stat.st_size}"
-    cache = st.session_state.setdefault("_pdf_src_cache", {})
-    if cache_key in cache:
-        return cache[cache_key]
-    with open(path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("utf-8")
-    src = f"data:application/pdf;base64,{b64}"
-    cache.clear()  # ayni anda birden fazla buyuk PDF'i bellekte tutmayalim
-    cache[cache_key] = src
-    return src
+    cache = st.session_state.setdefault("_pdf_cache", {})
+    if cache_key not in cache:
+        with open(path, "rb") as f:
+            data = f.read()
+        cache.clear()  # ayni anda birden fazla buyuk PDF'i bellekte tutmayalim
+        cache[cache_key] = {
+            "bytes": data,
+            "src": f"data:application/pdf;base64,{base64.b64encode(data).decode('utf-8')}",
+        }
+    return cache[cache_key]
 
 
 def show_pdf(path, height=780):
     """PDF'i satir ici (iframe) onizleme olarak gosterir; ogrenci sinav
     cozerken sekmeler arasi gecis yapmak zorunda kalmasin diye bu ANA
-    gorunumdur. Bazi tarayicilarda iframe icinde PDF gosterimi calismazsa
-    diye altina kucuk, ikincil bir 'yeni sekmede ac' baglantisi da eklenir."""
-    src = _pdf_src(path)
+    gorunumdur. Iframe bir sebepten gorunmezse diye altina bir INDIRME
+    dugmesi de eklenir -- ONEMLI: 'yeni sekmede ac' baglantisi degil,
+    gercek bir indirme dugmesi, cunku Chrome buyuk base64 (data:) linklerini
+    yeni sekmede acmayi guvenlik nedeniyle ENGELLIYOR (bos 'about:blank#blocked'
+    sayfasi cikmasinin sebebi buydu)."""
+    entry = _pdf_cache_entry(path)
     st.markdown(
-        f'<iframe src="{src}#view=FitH" '
+        f'<iframe src="{entry["src"]}#view=FitH" '
         f'width="100%" height="{height}px" style="border:1px solid #e2e8f0;border-radius:12px;"></iframe>',
         unsafe_allow_html=True,
     )
-    st.markdown(
-        f'<a href="{src}#view=FitH" target="_blank" rel="noopener" '
-        f'style="font-size:0.85rem;">📄 PDF ekranda görünmüyorsa buraya tıklayıp yeni sekmede açın</a>',
-        unsafe_allow_html=True,
+    st.download_button(
+        "⬇️ PDF ekranda görünmüyorsa buraya tıklayıp indirin",
+        data=entry["bytes"],
+        file_name=os.path.basename(path),
+        mime="application/pdf",
+        key=f"dl_{path}",
     )
 
 
 def pdf_link_button(path, label="🔓 Orijinal PDF (cevap anahtarlı)"):
-    """Sadece kucuk bir 'yeni sekmede ac' baglantisi dondurur (satir ici
-    onizleme YOK) -- admin panelindeki 'Kayitli Denemeler' listesinde
-    goruntu kirliligi yaratmamasi icin kullanilir."""
-    src = _pdf_src(path)
-    st.markdown(
-        f'<a href="{src}#view=FitH" target="_blank" rel="noopener" '
-        f'title="Cevap anahtarını içeren tam PDF — sadece siz görürsünüz, öğrenciyle paylaşmayın." '
-        f'style="font-size:0.85rem;text-decoration:none;">{label}</a>',
-        unsafe_allow_html=True,
+    """Kucuk bir INDIRME dugmesi (yeni sekmede acan bir link DEGIL --
+    Chrome buyuk data: linklerini yeni sekmede acmayi engelliyor) --
+    admin panelindeki 'Kayitli Denemeler' listesinde goruntu kirliligi
+    yaratmamasi icin, sadece bu buton acikca tiklandiginda cagrilir."""
+    entry = _pdf_cache_entry(path)
+    st.download_button(
+        label,
+        data=entry["bytes"],
+        file_name=os.path.basename(path),
+        mime="application/pdf",
+        key=f"dl_orig_{path}",
+        help="Cevap anahtarını içeren tam PDF — sadece siz görürsünüz, öğrenciyle paylaşmayın.",
     )
 
 
@@ -562,7 +595,7 @@ if st.session_state.is_admin:
                                     exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE, manual_key,
                                     source="manuel-elle-cevap", pdf_path_original=orig_path,
                                 )
-                                st.success(f"'{exam_title}' kaydedildi.")
+                                st.success(f"'{exam_title}' kaydedildi." + _compression_note(safe_path))
                                 st.rerun()
                     else:
                         safe_path = os.path.join(PDF_DIR, f"{slugify(exam_title, 'deneme')}_guvenli.pdf")
@@ -578,8 +611,12 @@ if st.session_state.is_admin:
                             exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE, final_key,
                             source="otomatik-ayrıştırma", pdf_path_original=orig_path,
                         )
-                        st.success(f"✅ '{exam_title}' başarıyla işlendi ve sisteme eklendi! Cevap anahtarı otomatik okundu ve son sayfalar gizlendi.")
+                        st.success(
+                            f"✅ '{exam_title}' başarıyla işlendi ve sisteme eklendi! Cevap anahtarı otomatik "
+                            f"okundu ve son sayfalar gizlendi." + _compression_note(safe_path)
+                        )
                         st.balloons()
+                        st.rerun()
 
         # ---------------- Diğer kategori / manuel ----------------
         elif admin_section == "Diğer Kategori / Soru Bankası Ekle (Manuel)":
@@ -663,7 +700,8 @@ if st.session_state.is_admin:
                     else:
                         safe_path = ""  # PDF yok, sadece cevap anahtarı / metin bazlı çalışılabilir
                     db.add_exam(title, gcat, safe_path, structure, final_key, source="manuel", pdf_path_original=orig_path)
-                    st.success(f"'{title}' {gcat} kategorisine eklendi.")
+                    note = _compression_note(safe_path) if safe_path else ""
+                    st.success(f"'{title}' {gcat} kategorisine eklendi." + note)
                     st.rerun()
 
         # ---------------- Otomatik indirme (EBA) ----------------
@@ -709,7 +747,7 @@ if st.session_state.is_admin:
                         {"Sözel": sozel_key, "Sayısal": sayisal_key}, source="otomatik-eba",
                         pdf_path_original=orig_path,
                     )
-                    st.success(f"✅ {yil}: eklendi.")
+                    st.success(f"✅ {yil}: eklendi." + _compression_note(safe_path))
                 st.rerun()
 
         # ---------------- URL'den indir ----------------
