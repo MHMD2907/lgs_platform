@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 import bot
 import config
@@ -137,28 +138,68 @@ def _pdf_cache_entry(path):
     if cache_key not in cache:
         with open(path, "rb") as f:
             data = f.read()
+        b64 = base64.b64encode(data).decode("utf-8")
         cache.clear()  # ayni anda birden fazla buyuk PDF'i bellekte tutmayalim
         cache[cache_key] = {
             "bytes": data,
-            "src": f"data:application/pdf;base64,{base64.b64encode(data).decode('utf-8')}",
+            "b64": b64,
+            "src": f"data:application/pdf;base64,{b64}",
         }
     return cache[cache_key]
 
 
 def show_pdf(path, height=780):
-    """PDF'i satir ici (iframe) onizleme olarak gosterir; ogrenci sinav
-    cozerken sekmeler arasi gecis yapmak zorunda kalmasin diye bu ANA
-    gorunumdur. Iframe bir sebepten gorunmezse diye altina bir INDIRME
-    dugmesi de eklenir -- ONEMLI: 'yeni sekmede ac' baglantisi degil,
-    gercek bir indirme dugmesi, cunku Chrome buyuk base64 (data:) linklerini
-    yeni sekmede acmayi guvenlik nedeniyle ENGELLIYOR (bos 'about:blank#blocked'
-    sayfasi cikmasinin sebebi buydu)."""
+    """PDF'i satir ici onizleme olarak gosterir.
+
+    ONEMLI - NEDEN 'Blob URL' KULLANILIYOR (data: URI DEGIL): Onceki
+    denemede iframe'in src'sine dogrudan buyuk bir 'data:application/pdf;
+    base64,...' adresi verilmisti. Bu YANLIS cikti: PDF'i indirip disaridan
+    acmak sorunsuz calisirken (dosyanin kendisi saglam), TARAYICIDA (iframe
+    icinde) hicbir sey gorunmuyordu -- yani sorun dosyada degil, Chrome'un
+    cok buyuk bir 'data:' adresini iframe'e dogrudan yuklerken sessizce
+    basarisiz olmasindaymis. Bunun bilinen/guvenilir cozumu: base64 veriyi
+    tarayicida (JavaScript ile) gercek bir ikili dosyaya ('Blob') cevirip,
+    ondan geçici bir 'blob:' adresi uretmek -- tarayicilar bunu data:
+    adreslerinden cok daha guvenilir isliyor. Bunu calistırmak icin de
+    st.markdown yerine st.components.v1.html kullanmak sart: st.markdown
+    ile eklenen <script> etiketleri TARAYICI TARAFINDAN CALISTIRILMAZ
+    (Streamlit bunu bir HTML parcasi olarak sayfaya "yapistiriyor", kod
+    olarak calistirmiyor); components.html ise gercek, script'lerin
+    calisabildigi bir iframe olusturuyor."""
     entry = _pdf_cache_entry(path)
-    st.markdown(
-        f'<iframe src="{entry["src"]}#view=FitH" '
-        f'width="100%" height="{height}px" style="border:1px solid #e2e8f0;border-radius:12px;"></iframe>',
-        unsafe_allow_html=True,
-    )
+    frame_id = f"pdf_{abs(hash(path))}"
+    html = f"""
+    <div style="width:100%;">
+      <div id="{frame_id}_loading" style="font-family:sans-serif;color:#64748b;padding:12px;">
+        📄 PDF hazırlanıyor...
+      </div>
+      <iframe id="{frame_id}" style="display:none;width:100%;height:{height}px;
+        border:1px solid #e2e8f0;border-radius:12px;"></iframe>
+    </div>
+    <script>
+      (function() {{
+        try {{
+          var b64 = "{entry['b64']}";
+          var byteChars = atob(b64);
+          var byteNumbers = new Array(byteChars.length);
+          for (var i = 0; i < byteChars.length; i++) {{
+            byteNumbers[i] = byteChars.charCodeAt(i);
+          }}
+          var byteArray = new Uint8Array(byteNumbers);
+          var blob = new Blob([byteArray], {{type: 'application/pdf'}});
+          var url = URL.createObjectURL(blob);
+          var frame = document.getElementById("{frame_id}");
+          frame.src = url + "#view=FitH";
+          frame.style.display = "block";
+          document.getElementById("{frame_id}_loading").style.display = "none";
+        }} catch (e) {{
+          document.getElementById("{frame_id}_loading").innerText =
+            "PDF tarayıcıda gösterilemedi (" + e + "). Aşağıdaki indirme düğmesini kullanın.";
+        }}
+      }})();
+    </script>
+    """
+    components.html(html, height=height + 10, scrolling=True)
     st.download_button(
         "⬇️ PDF ekranda görünmüyorsa buraya tıklayıp indirin",
         data=entry["bytes"],
@@ -511,6 +552,19 @@ if st.session_state.is_admin:
     with tabs[2]:
         st.subheader("⚙️ Admin Paneli")
 
+        # Bir işlem (örn. deneme ekleme) bittiğinde st.rerun() çağırıyoruz ki
+        # "Sınav Çöz" sekmesi de hemen güncellensin -- ama bu, o an ekranda
+        # olan yeşil "başarılı" mesajının göz açıp kapayana kadar kaybolup
+        # gitmesine sebep oluyordu. Bunun yerine mesajı burada, oturumda
+        # saklayıp bir SONRAKI (rerun sonrası) sayfa yüklemesinde gösteriyoruz
+        # -- böylece siz bir sonraki işleme geçene kadar ekranda kalıyor.
+        _flashes = st.session_state.pop("_admin_flash", None)
+        if _flashes:
+            if isinstance(_flashes, tuple):
+                _flashes = [_flashes]
+            for _kind, _text in _flashes:
+                (st.success if _kind == "success" else st.error)(_text)
+
         admin_section = st.radio(
             "İşlem seçin",
             [
@@ -590,28 +644,33 @@ if st.session_state.is_admin:
                                 orig_path = os.path.join(
                                     PRIVATE_DIR,f"{slugify(exam_title, 'deneme')}_orijinal.pdf"
                                 )
-                                parsing.merge_full([sozel_pdf, sayisal_pdf], orig_path)
+                                with st.spinner("PDF hazırlanıyor ve küçültülüyor, bu birkaç saniye sürebilir..."):
+                                    parsing.merge_full([sozel_pdf, sayisal_pdf], orig_path)
                                 db.add_exam(
                                     exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE, manual_key,
                                     source="manuel-elle-cevap", pdf_path_original=orig_path,
                                 )
-                                st.success(f"'{exam_title}' kaydedildi." + _compression_note(safe_path))
+                                st.session_state["_admin_flash"] = (
+                                    "success", f"'{exam_title}' kaydedildi." + _compression_note(safe_path)
+                                )
                                 st.rerun()
                     else:
                         safe_path = os.path.join(PDF_DIR, f"{slugify(exam_title, 'deneme')}_guvenli.pdf")
-                        parsing.crop_and_merge(
-                            [(sozel_pdf, sozel_idx), (sayisal_pdf, sayisal_idx)], safe_path
-                        )
-                        orig_path = os.path.join(
-                            PRIVATE_DIR,f"{slugify(exam_title, 'deneme')}_orijinal.pdf"
-                        )
-                        parsing.merge_full([sozel_pdf, sayisal_pdf], orig_path)
+                        with st.spinner("PDF hazırlanıyor ve küçültülüyor, bu birkaç saniye sürebilir..."):
+                            parsing.crop_and_merge(
+                                [(sozel_pdf, sozel_idx), (sayisal_pdf, sayisal_idx)], safe_path
+                            )
+                            orig_path = os.path.join(
+                                PRIVATE_DIR,f"{slugify(exam_title, 'deneme')}_orijinal.pdf"
+                            )
+                            parsing.merge_full([sozel_pdf, sayisal_pdf], orig_path)
                         final_key = {"Sözel": sozel_key, "Sayısal": sayisal_key}
                         db.add_exam(
                             exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE, final_key,
                             source="otomatik-ayrıştırma", pdf_path_original=orig_path,
                         )
-                        st.success(
+                        st.session_state["_admin_flash"] = (
+                            "success",
                             f"✅ '{exam_title}' başarıyla işlendi ve sisteme eklendi! Cevap anahtarı otomatik "
                             f"okundu ve son sayfalar gizlendi." + _compression_note(safe_path)
                         )
@@ -694,14 +753,15 @@ if st.session_state.is_admin:
                     if uploaded:
                         idx = st.session_state.get("_gen_key_idx")
                         safe_path = os.path.join(PDF_DIR, f"{safe_title}_guvenli.pdf")
-                        parsing.crop_and_merge([(uploaded, idx if idx is not None else parsing.pdf_page_count(uploaded) - 1)], safe_path)
-                        orig_path = os.path.join(PRIVATE_DIR,f"{safe_title}_orijinal.pdf")
-                        parsing.merge_full([uploaded], orig_path)
+                        with st.spinner("PDF hazırlanıyor ve küçültülüyor, bu birkaç saniye sürebilir..."):
+                            parsing.crop_and_merge([(uploaded, idx if idx is not None else parsing.pdf_page_count(uploaded) - 1)], safe_path)
+                            orig_path = os.path.join(PRIVATE_DIR,f"{safe_title}_orijinal.pdf")
+                            parsing.merge_full([uploaded], orig_path)
                     else:
                         safe_path = ""  # PDF yok, sadece cevap anahtarı / metin bazlı çalışılabilir
                     db.add_exam(title, gcat, safe_path, structure, final_key, source="manuel", pdf_path_original=orig_path)
                     note = _compression_note(safe_path) if safe_path else ""
-                    st.success(f"'{title}' {gcat} kategorisine eklendi." + note)
+                    st.session_state["_admin_flash"] = ("success", f"'{title}' {gcat} kategorisine eklendi." + note)
                     st.rerun()
 
         # ---------------- Otomatik indirme (EBA) ----------------
@@ -722,6 +782,7 @@ if st.session_state.is_admin:
 
                 sozel_subjects = [(n, c) for n, c, _ in LGS_SUBJECTS["Sözel"]]
                 sayisal_subjects = [(n, c) for n, c, _ in LGS_SUBJECTS["Sayısal"]]
+                _eba_flashes = []
 
                 for yil in years:
                     exam_title = f"{yil} LGS (Resmi Arşiv)"
@@ -739,15 +800,18 @@ if st.session_state.is_admin:
                         st.error(f"{yil}: indirildi ama cevap anahtarı otomatik okunamadı ({sozel_msg or sayisal_msg}). Manuel yüklemeyi deneyin.")
                         continue
                     safe_path = os.path.join(PDF_DIR, f"{yil}_LGS_guvenli.pdf")
-                    parsing.crop_and_merge([(res["Sözel"], sozel_idx), (res["Sayısal"], sayisal_idx)], safe_path)
-                    orig_path = os.path.join(PRIVATE_DIR,f"{yil}_LGS_orijinal.pdf")
-                    parsing.merge_full([res["Sözel"], res["Sayısal"]], orig_path)
+                    with st.spinner(f"{yil}: PDF hazırlanıyor ve küçültülüyor, bu birkaç saniye sürebilir..."):
+                        parsing.crop_and_merge([(res["Sözel"], sozel_idx), (res["Sayısal"], sayisal_idx)], safe_path)
+                        orig_path = os.path.join(PRIVATE_DIR,f"{yil}_LGS_orijinal.pdf")
+                        parsing.merge_full([res["Sözel"], res["Sayısal"]], orig_path)
                     db.add_exam(
                         exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE,
                         {"Sözel": sozel_key, "Sayısal": sayisal_key}, source="otomatik-eba",
                         pdf_path_original=orig_path,
                     )
-                    st.success(f"✅ {yil}: eklendi." + _compression_note(safe_path))
+                    _eba_flashes.append(("success", f"✅ {yil}: eklendi." + _compression_note(safe_path)))
+                if _eba_flashes:
+                    st.session_state["_admin_flash"] = _eba_flashes
                 st.rerun()
 
         # ---------------- URL'den indir ----------------
