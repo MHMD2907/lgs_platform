@@ -1,0 +1,11 @@
+streamlit>=1.35
+pandas>=2.0
+pdfplumber>=0.11
+PyPDF2>=3.0
+pycryptodome>=3.20   # MEB'in resmi LGS PDF'leri şifreli (AES) olduğu için gerekli
+requests>=2.31
+
+# Google Drive entegrasyonu için (opsiyonel; kullanmayacaksanız kurmasanız da olur)
+google-api-python-client>=2.100
+google-auth-httplib2>=0.2
+google-auth-oauthlib>=1.2
