@@ -99,10 +99,25 @@ def _pdf_src(path):
     dogrulanamadigi icin (bos/beyaz sayfa gozlemlendi), HER PDF -- boyutu ne
     olursa olsun -- guvenilir sekilde calisan base64 gomme yontemiyle
     gosterilir. Bu, sunucu ayarina bagimli olmadigi icin daha yavas ama
-    daha saglam bir yontemdir."""
+    daha saglam bir yontemdir.
+
+    ONEMLI - PERFORMANS: Ogrenci sinav cozerken her cevap tikladiginda
+    sayfa yeniden calisiyor (ilerlemeyi otomatik kaydedebilmek icin). Bu
+    yuzden ayni dosyayi HER rerun'da yeniden okuyup base64'e cevirmek
+    (10+ MB'lik bir PDF icin saniyeler surebilir) cok yavas olur. Bu
+    yuzden sonucu, dosya degismedigi surece (yol + degisim zamani + boyut
+    anahtar olarak) oturum icinde ONBELLEKTE tutuyoruz."""
+    stat = os.stat(path)
+    cache_key = f"{path}|{stat.st_mtime_ns}|{stat.st_size}"
+    cache = st.session_state.setdefault("_pdf_src_cache", {})
+    if cache_key in cache:
+        return cache[cache_key]
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
-    return f"data:application/pdf;base64,{b64}"
+    src = f"data:application/pdf;base64,{b64}"
+    cache.clear()  # ayni anda birden fazla buyuk PDF'i bellekte tutmayalim
+    cache[cache_key] = src
+    return src
 
 
 def show_pdf(path, height=780):
@@ -750,7 +765,19 @@ if st.session_state.is_admin:
                     st.rerun()
                 with c4:
                     if e.get("pdf_path_original") and os.path.exists(e["pdf_path_original"]):
-                        pdf_link_button(e["pdf_path_original"])
+                        # ONEMLI - PERFORMANS: Orijinal PDF'i (buyuk olabilir)
+                        # base64'e cevirme islemini SADECE admin gercekten
+                        # gormek istediginde yapiyoruz -- yoksa bu listede
+                        # baska bir sey (orn. baska bir denemeyi SILMEK)
+                        # her seferinde TUM buyuk PDF'leri gereksiz yere
+                        # yeniden kodlar ve sayfa cok yavaslar.
+                        show_key = f"show_orig_{e['id']}"
+                        if not st.session_state.get(show_key):
+                            if st.button("🔓 Orijinal PDF", key=f"origbtn_{e['id']}"):
+                                st.session_state[show_key] = True
+                                st.rerun()
+                        else:
+                            pdf_link_button(e["pdf_path_original"])
                     else:
                         st.caption("Orijinal PDF yok")
                 st.divider()

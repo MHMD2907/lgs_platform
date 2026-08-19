@@ -16,9 +16,68 @@ LGS cevap anahtarlari) ile test edilip dogrulanmistir.
 import io
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 
 import pdfplumber
 from PyPDF2 import PdfReader, PdfWriter
+
+try:
+    from PIL import Image
+except Exception:  # Pillow kurulu değilse sıkıştırma sessizce atlanır
+    Image = None
+
+
+def _compress_pdf_for_display(path, dpi=130, quality=62):
+    """MEB'in resmi LGS kitapçıkları genelde 10-15 MB civarında oluyor
+    (bazı sayfalardaki gradyan/gölgeli vektör çizimler yüzünden -- bu,
+    normal PDF sıkıştırma araçlarının (Ghostscript'in görsel-küçültme
+    ayarları dahil) pek işe yaramadığı, "resim değil vektör" bir sorun).
+    En güvenilir çözüm: her sayfayı SABİT bir çözünürlükte resme çevirip
+    (öğrenci zaten sadece OKUYACAK, metni seçip kopyalamayacak), o
+    resimlerden yeni, çok daha küçük bir PDF oluşturmak. Bu dosyayı
+    tarayıcıya göndermek (base64 ile gömülü olsa bile) çok daha hızlı
+    ve güvenilir olur.
+
+    Ghostscript (gs) sistemde kurulu değilse (ör. henüz packages.txt
+    Streamlit Cloud'a yüklenmediyse) ya da herhangi bir adımda hata
+    olursa, ORİJİNAL (sıkıştırılmamış) dosya olduğu gibi bırakılır --
+    yani bu adım asla denemeyi bozmaz, sadece atlanır.
+    """
+    if Image is None or shutil.which("gs") is None:
+        return False
+    tmpdir = tempfile.mkdtemp(prefix="lgs_compress_")
+    try:
+        pattern = os.path.join(tmpdir, "p_%04d.jpg")
+        result = subprocess.run(
+            [
+                "gs", "-q", "-dNOPAUSE", "-dBATCH", "-dSAFER",
+                "-sDEVICE=jpeg", f"-r{dpi}", f"-dJPEGQ={quality}",
+                f"-o{pattern}", path,
+            ],
+            capture_output=True, timeout=180,
+        )
+        if result.returncode != 0:
+            return False
+        page_files = sorted(
+            f for f in os.listdir(tmpdir) if f.startswith("p_") and f.endswith(".jpg")
+        )
+        if not page_files:
+            return False
+        images = [Image.open(os.path.join(tmpdir, f)).convert("RGB") for f in page_files]
+        out_path = os.path.join(tmpdir, "out.pdf")
+        images[0].save(out_path, save_all=True, append_images=images[1:])
+        for im in images:
+            im.close()
+        # Sadece gerçekten küçüldüyse orijinalin üzerine yaz (garanti altına al).
+        if os.path.getsize(out_path) < os.path.getsize(path):
+            shutil.copyfile(out_path, path)
+        return True
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _cluster_columns(numtoks, gap=35):
@@ -125,6 +184,10 @@ def crop_and_merge(file_specs, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "wb") as f_out:
         writer.write(f_out)
+    # MEB kitapçıkları bazen tek başına 10-15 MB olabiliyor; öğrenci
+    # tarayıcıda hızlı ve güvenilir görebilsin diye dosyayı küçültmeyi
+    # dene (Ghostscript yoksa/hata olursa orijinal dosya öylece kalır).
+    _compress_pdf_for_display(output_path)
     return output_path
 
 
@@ -144,6 +207,7 @@ def merge_full(file_specs, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "wb") as f_out:
         writer.write(f_out)
+    _compress_pdf_for_display(output_path)
     return output_path
 
 

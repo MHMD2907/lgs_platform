@@ -396,10 +396,23 @@ def get_exam(exam_id):
 
 
 def delete_exam(exam_id):
+    """Sınavı veritabanından siler VE diskte kalan PDF dosyalarını da
+    temizler (silmezsek dosyalar sunucuda gereksiz yer kaplamaya devam eder)."""
     conn = get_conn()
+    row = conn.execute(
+        "SELECT pdf_path, pdf_path_original FROM exams WHERE id = ?", (exam_id,)
+    ).fetchone()
     conn.execute("DELETE FROM exams WHERE id = ?", (exam_id,))
     conn.commit()
     conn.close()
+    if row:
+        for key in ("pdf_path", "pdf_path_original"):
+            p = row[key] if key in row.keys() else None
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
 
 # ---------- results ----------
