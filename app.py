@@ -217,27 +217,22 @@ with st.sidebar:
         else:
             st.subheader("⚙️ Yönetici Girişi")
             render_admin_login_form()
+    elif st.session_state.student_name:
+        # Sadece öğrenci girişi yapılmış: kafa karışıklığını önlemek için
+        # burada ayrıca "Yönetici Girişi" seçeneği GÖSTERİLMEZ. Yönetici
+        # girişi yapmak isteyen kişi önce çıkış yapıp Yönetici'yi seçmelidir.
+        st.success(f"Hoş geldin, {st.session_state.student_display_name}! 👋")
+        if st.button("Çıkış Yap", key="student_logout_btn", use_container_width=True):
+            st.session_state.student_name = ""
+            st.session_state.student_display_name = ""
+            st.rerun()
     else:
-        if st.session_state.student_name:
-            st.success(f"Hoş geldin, {st.session_state.student_display_name}! 👋")
-            if st.button("Çıkış Yap", key="student_logout_btn", use_container_width=True):
-                st.session_state.student_name = ""
-                st.session_state.student_display_name = ""
-                st.rerun()
-        else:
-            with st.expander("👤 Öğrenci Girişi"):
-                render_student_login_form()
-
-        st.divider()
-
-        if st.session_state.is_admin:
-            st.success("Yönetici olarak giriş yaptınız.")
-            if st.button("Çıkış Yap", key="admin_logout_btn", use_container_width=True):
-                st.session_state.is_admin = False
-                st.rerun()
-        else:
-            with st.expander("⚙️ Yönetici Girişi"):
-                render_admin_login_form()
+        # Sadece yönetici girişi yapılmış: aynı şekilde "Öğrenci Girişi"
+        # burada GÖSTERİLMEZ, tek bir durum net şekilde görünür.
+        st.success("Yönetici olarak giriş yaptınız.")
+        if st.button("Çıkış Yap", key="admin_logout_btn", use_container_width=True):
+            st.session_state.is_admin = False
+            st.rerun()
 
 tab_names = ["📱 Sınav Çöz", "📊 Gelişim Raporum"]
 if st.session_state.is_admin:
