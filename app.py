@@ -10,7 +10,6 @@ Tablet/bilgisayar tarayıcısından çalışan, geçmiş yıl LGS (ve 6-7. sın�
 Ayrıntılı kurulum ve kullanım için README.md dosyasına bakın.
 """
 
-import base64
 import io
 import os
 import re
@@ -19,7 +18,6 @@ from datetime import datetime
 from urllib.parse import quote
 
 import pandas as pd
-import pdfplumber
 import streamlit as st
 
 import bot
@@ -119,9 +117,9 @@ def _compression_note(path):
 
 
 def _pdf_cache_entry(path):
-    """Bir PDF'in ham baytlarini VE tarayicida gostermek icin gereken
-    base64 'data:' adresini oturum icinde bir kez hesaplayip onbellekte
-    tutar (yol + degisim zamani + boyut anahtar olarak).
+    """Bir PDF'in ham baytlarini oturum icinde bir kez okuyup onbellekte
+    tutar (yol + degisim zamani + boyut anahtar olarak). Sadece "kitapcigin
+    tamamini indir" dugmesi icin kullanilir.
 
     ONEMLI - PERFORMANS: Ogrenci sinav cozerken her cevap tikladiginda
     sayfa yeniden calisiyor (ilerlemeyi otomatik kaydedebilmek icin). Bu
@@ -138,55 +136,61 @@ def _pdf_cache_entry(path):
     if cache_key not in cache:
         with open(path, "rb") as f:
             data = f.read()
-        b64 = base64.b64encode(data).decode("utf-8")
         cache.clear()  # ayni anda birden fazla buyuk PDF'i bellekte tutmayalim
-        cache[cache_key] = {
-            "bytes": data,
-            "b64": b64,
-            "src": f"data:application/pdf;base64,{b64}",
-        }
+        # NOT: Burada eskiden bir de base64 ("data:") metni uretiliyordu.
+        # Artik PDF sayfa sayfa RESIM olarak gosterildigi icin buna hic
+        # gerek kalmadi; 11 MB'lik bir dosya icin her seferinde ~15 MB'lik
+        # metin uretmek bosuna yavaslik demekti, kaldirildi.
+        cache[cache_key] = {"bytes": data}
     return cache[cache_key]
 
 
-def _pdf_page_count(path):
-    """Bir PDF'in sayfa sayisini oturum icinde bir kez hesaplayip
-    onbellekte tutar (yol + degisim zamani anahtar)."""
-    stat = os.stat(path)
-    cache_key = f"{path}|{stat.st_mtime_ns}|{stat.st_size}"
-    cache = st.session_state.setdefault("_pdf_pagecount_cache", {})
-    if cache_key not in cache:
-        with pdfplumber.open(path) as pdf:
-            cache.clear()
-            cache[cache_key] = len(pdf.pages)
-    return cache[cache_key]
+@st.cache_data(show_spinner=False, max_entries=8)
+def _pdf_page_count(path, mtime_ns):
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument(path)
+    try:
+        return len(doc)
+    finally:
+        doc.close()
 
 
-def _pdf_page_image(path, page_num, dpi=130):
-    """Bir PDF sayfasini DUZ BIR RESME (JPEG bayt dizisi) cevirip
-    onbellekte tutar.
+@st.cache_data(show_spinner=False, max_entries=60)
+def _pdf_page_image(path, mtime_ns, page_num, dpi=130):
+    """Bir PDF sayfasini DUZ BIR RESME (JPEG bayt dizisi) cevirir.
 
     ONEMLI - NEDEN RESIM: PDF'i tarayiciya gomup gostermenin denenen HER
     YOLU (dogrudan 'data:' adresi iframe'e verilmesi, 'data:' adresinin
     yeni sekmede acilmasi, base64'un JavaScript ile 'Blob'a cevrilip
     iframe'e verilmesi) tarayici guvenlik kisitlamalarina takildi -- Chrome
     hepsini "engellendi" diyerek reddetti, hem masaustunde hem telefonda.
-    Duz bir RESIM (JPEG) ise sıradan bir fotoğraf gibi davranır; PDF'e
-    özel HİÇBİR güvenlik kısıtlaması yoktur ve her cihazda çalışır. Bu
-    yuzden her sayfa sunucu tarafinda (pdfplumber/pypdfium2 ile) resme
-    cevrilip st.image() ile gosteriliyor."""
-    stat = os.stat(path)
-    cache_key = f"{path}|{stat.st_mtime_ns}|{page_num}|{dpi}"
-    cache = st.session_state.setdefault("_pdf_page_img_cache", {})
-    if cache_key not in cache:
-        # Bellek şişmesin diye aynı anda en fazla birkaç sayfa tutulur.
-        if len(cache) >= 6:
-            del cache[next(iter(cache))]
-        with pdfplumber.open(path) as pdf:
-            page_img = pdf.pages[page_num].to_image(resolution=dpi)
-            buf = io.BytesIO()
-            page_img.original.convert("RGB").save(buf, format="JPEG", quality=80)
-            cache[cache_key] = buf.getvalue()
-    return cache[cache_key]
+    Duz bir RESIM (JPEG) ise siradan bir fotograf gibi davranir; PDF'e
+    ozel HICBIR guvenlik kisitlamasi yoktur ve her cihazda calisir.
+
+    ONEMLI - HIZ: Once bu is pdfplumber ile yapiliyordu; pdfplumber sayfayi
+    cizmek icin TUM PDF'i ayristirdigindan tek sayfa ~1.7 saniye suruyordu
+    (kullanicinin "sayfalar arasinda hemen geçmiyor" dedigi sorun).
+    Dogrudan pypdfium2 ile bu sure olcumle 0.04 saniyeye dustu (~40 kat).
+    Dosya her cagrida yeniden aciliyor ama bunun maliyeti olculdu: sadece
+    0.005 saniye. Belgeyi acik tutup paylasmak yerine boyle yapiliyor,
+    cunku ayni belge nesnesini birden fazla kullanici ayni anda kullanirsa
+    (anne-baba ve cocuk ayni anda girerse) cizim islemi guvenli degil.
+
+    st.cache_data: onbellek OTURUMLAR ARASI paylasilir, yani ayni sayfaya
+    ikinci kez bakildiginda (ya da baska bir cihazdan ayni denemeye
+    girildiginde) sayfa aninda gelir. mtime_ns anahtarin parcasi: deneme
+    silinip yeniden eklenirse eski resimler otomatik gecersiz olur."""
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument(path)
+    try:
+        pil = doc[page_num].render(scale=dpi / 72).to_pil()
+    finally:
+        doc.close()
+    buf = io.BytesIO()
+    pil.convert("RGB").save(buf, format="JPEG", quality=80)
+    return buf.getvalue()
 
 
 def show_pdf(path, height=780):
@@ -197,7 +201,7 @@ def show_pdf(path, height=780):
     (data: URI, yeni sekme, Blob) hepsinin tarayici tarafindan engellenmesi
     uzerine bulunan cozum)."""
     try:
-        page_count = _pdf_page_count(path)
+        page_count = _pdf_page_count(path, os.stat(path).st_mtime_ns)
     except Exception as e:
         st.error(f"PDF okunamadı: {e}")
         return
@@ -207,56 +211,63 @@ def show_pdf(path, height=780):
         st.session_state[state_key] = 0
     st.session_state[state_key] = max(0, min(st.session_state[state_key], page_count - 1))
 
-    nav1, nav2, nav3 = st.columns([1, 2, 1])
-    with nav1:
-        if st.button("◀ Önceki", key=f"prev_{path}", use_container_width=True,
-                      disabled=st.session_state[state_key] <= 0):
-            st.session_state[state_key] -= 1
-            st.rerun()
-    with nav3:
-        if st.button("Sonraki ▶", key=f"next_{path}", use_container_width=True,
-                      disabled=st.session_state[state_key] >= page_count - 1):
-            st.session_state[state_key] += 1
-            st.rerun()
-    with nav2:
-        # ÖNEMLİ: key'in içine geçerli sayfa numarası eklendi. Aksi halde
-        # Streamlit, "Önceki/Sonraki" ile sayfa değiştiğinde bu widget'ın
-        # ESKİ değerini session_state'te tuttuğu için yeni 'value=' parametresini
-        # YOK SAYAR -- bu da tıklamayı sessizce geri alırdı. Sayfa değiştikçe
-        # anahtar da değiştiği için widget her seferinde temiz/doğru değerle
-        # yeniden oluşturuluyor.
-        new_page = st.number_input(
-            f"Sayfa (1 - {page_count})",
-            min_value=1, max_value=page_count,
-            value=st.session_state[state_key] + 1,
-            key=f"_pdf_jump_{path}_{st.session_state[state_key]}",
-            label_visibility="collapsed",
-        )
-        if new_page - 1 != st.session_state[state_key]:
-            st.session_state[state_key] = new_page - 1
-            st.rerun()
+    def _nav_row(where):
+        """Sayfa gezinme satiri. HEM ustte HEM altta gosteriliyor: ogrenci
+        sayfanin sonuna kadar okuduktan sonra bir sonraki sayfaya gecmek
+        icin yukari kaydirmak zorunda kalmasin."""
+        cur = st.session_state[state_key]
+        nav1, nav2, nav3 = st.columns([1, 2, 1])
+        with nav1:
+            if st.button("◀ Önceki", key=f"prev_{where}_{path}", use_container_width=True,
+                         disabled=cur <= 0):
+                st.session_state[state_key] = cur - 1
+                st.rerun()
+        with nav3:
+            if st.button("Sonraki ▶", key=f"next_{where}_{path}", use_container_width=True,
+                         disabled=cur >= page_count - 1):
+                st.session_state[state_key] = cur + 1
+                st.rerun()
+        with nav2:
+            # ÖNEMLİ: key'in içine geçerli sayfa numarası eklendi. Aksi halde
+            # Streamlit, "Önceki/Sonraki" ile sayfa değiştiğinde bu widget'ın
+            # ESKİ değerini session_state'te tuttuğu için yeni 'value=' parametresini
+            # YOK SAYAR -- bu da tıklamayı sessizce geri alırdı. Sayfa değiştikçe
+            # anahtar da değiştiği için widget her seferinde temiz/doğru değerle
+            # yeniden oluşturuluyor.
+            new_page = st.number_input(
+                f"Sayfa (1 - {page_count})",
+                min_value=1, max_value=page_count, value=cur + 1,
+                key=f"_pdf_jump_{where}_{path}_{cur}",
+                label_visibility="collapsed",
+            )
+            if new_page - 1 != cur:
+                st.session_state[state_key] = new_page - 1
+                st.rerun()
 
-    with st.spinner("Sayfa yükleniyor..."):
-        try:
-            img_bytes = _pdf_page_image(path, st.session_state[state_key])
-        except Exception as e:
-            st.error(f"Sayfa gösterilirken hata oluştu: {e}")
-            return
+    _nav_row("top")
+
+    try:
+        img_bytes = _pdf_page_image(path, os.stat(path).st_mtime_ns, st.session_state[state_key])
+    except Exception as e:
+        st.error(f"Sayfa gösterilirken hata oluştu: {e}")
+        return
 
     with st.container(height=height, border=True):
         st.image(img_bytes, use_container_width=True)
 
     st.caption(f"📄 Sayfa {st.session_state[state_key] + 1} / {page_count}")
+    _nav_row("bottom")
 
-    entry = _pdf_cache_entry(path)
-    st.download_button(
-        "⬇️ Kitapçığın Tamamını İndir",
-        data=entry["bytes"],
-        file_name=os.path.basename(path),
-        mime="application/pdf",
-        use_container_width=True,
-        key=f"dl_{path}",
-    )
+    with st.expander("⬇️ Kitapçığın tamamını indir"):
+        entry = _pdf_cache_entry(path)
+        st.download_button(
+            "Tüm kitapçığı PDF olarak indir",
+            data=entry["bytes"],
+            file_name=os.path.basename(path),
+            mime="application/pdf",
+            use_container_width=True,
+            key=f"dl_{path}",
+        )
 
 
 def pdf_link_button(path, label="🔓 Orijinal PDF (cevap anahtarlı)"):
@@ -279,8 +290,14 @@ def inject_css():
     st.markdown(
         """
         <style>
-        #MainMenu, footer {visibility: hidden;}
-        .block-container {padding-top: 3.5rem; padding-left: 2rem; padding-right: 2rem; max-width: 100%;}
+        /* Streamlit'in kendi ust seridi (Share / GitHub / kalem ikonlari) ve
+           alt bilgi satiri gizlenir -- boylece ekran gercek bir uygulama gibi
+           gorunur ve PDF'e daha fazla dikey yer kalir. */
+        #MainMenu, footer, header {visibility: hidden;}
+        div[data-testid="stToolbar"] {display: none !important;}
+        div[data-testid="stDecoration"] {display: none !important;}
+        div[data-testid="stStatusWidget"] {display: none !important;}
+        .block-container {padding-top: 1.2rem; padding-left: 2rem; padding-right: 2rem; max-width: 100%;}
         div[data-baseweb="tab-list"] {
             overflow-x: visible !important;
             flex-wrap: wrap;
@@ -419,17 +436,58 @@ with st.sidebar:
         # burada ayrıca "Yönetici Girişi" seçeneği GÖSTERİLMEZ. Yönetici
         # girişi yapmak isteyen kişi önce çıkış yapıp Yönetici'yi seçmelidir.
         st.success(f"Hoş geldin, {st.session_state.student_display_name}! 👋")
+        if st.session_state.is_admin:
+            # Yönetici, yukarıdaki "öğrenci olarak devam et" ile bu moda
+            # geçmiş olabilir; hâlâ yönetici olduğunu görebilmeli.
+            st.caption("⚙️ Aynı zamanda yönetici olarak giriş yaptınız.")
         if st.button("Çıkış Yap", key="student_logout_btn", use_container_width=True):
             st.session_state.student_name = ""
             st.session_state.student_display_name = ""
             st.rerun()
+        if st.session_state.is_admin and st.button(
+            "Yönetici oturumunu da kapat", key="admin_logout_btn2", use_container_width=True
+        ):
+            st.session_state.is_admin = False
+            st.session_state.student_name = ""
+            st.session_state.student_display_name = ""
+            st.rerun()
     else:
-        # Sadece yönetici girişi yapılmış: aynı şekilde "Öğrenci Girişi"
-        # burada GÖSTERİLMEZ, tek bir durum net şekilde görünür.
+        # Sadece yönetici girişi yapılmış.
         st.success("Yönetici olarak giriş yaptınız.")
         if st.button("Çıkış Yap", key="admin_logout_btn", use_container_width=True):
             st.session_state.is_admin = False
             st.rerun()
+
+        # ÖNEMLİ - ÖNCEKİ SÜRÜMDEKİ HATA: Burada öğrenci seçme imkânı hiç
+        # yoktu. Yönetici olarak giriş yapan kişi "Sınav Çöz" sekmesinde
+        # soruları işaretleyebiliyor, ama "Sınavı Bitir" dediğinde sistem
+        # "önce giriş yapın" diyordu -- ve giriş yapacak bir yer de
+        # olmadığı için sınav ASLA bitirilemiyordu. Yönetici zaten şifresiyle
+        # kimliğini doğrulamış olduğu için, burada kimin adına çözüleceğini
+        # tek bir kutudan seçmesi yeterli (ayrıca şifre sorulmuyor).
+        _students = db.get_students()
+        if _students:
+            st.divider()
+            st.caption("Kendiniz deneme çözmek/test etmek isterseniz, kimin adına çözüleceğini seçin:")
+            _opts = [None] + [s["username"] for s in _students]
+            _labels = {s["username"]: s["display_name"] for s in _students}
+            _chosen = st.selectbox(
+                "Öğrenci olarak devam et",
+                _opts,
+                format_func=lambda u: "— Öğrenci seçilmedi —" if u is None else _labels.get(u, u),
+                key="admin_as_student",
+            )
+            if _chosen and st.button("Bu öğrenci olarak devam et", key="admin_as_student_btn",
+                                     use_container_width=True):
+                st.session_state.student_name = _chosen
+                st.session_state.student_display_name = _labels.get(_chosen, _chosen)
+                st.rerun()
+        else:
+            st.divider()
+            st.caption(
+                "Henüz kayıtlı öğrenci yok. Sınav sonuçlarının kaydedilebilmesi için "
+                "Admin Paneli → Öğrenciler bölümünden bir öğrenci ekleyin."
+            )
 
 tab_names = ["📱 Sınav Çöz", "📊 Gelişim Raporum"]
 if st.session_state.is_admin:
@@ -441,10 +499,22 @@ tabs = st.tabs(tab_names)
 with tabs[0]:
     st.markdown("### 📱 Sınav Çöz")
     st.caption("Aşağıdan bir kategori ve deneme seçerek başlayın.")
+    # ÖNEMLİ - "GİRİŞ YAPINCA HER ŞEY SIFIRLANIYOR" HATASININ KÖK NEDENİ:
+    # Streamlit, bir çalışma turunda EKRANA ÇİZİLMEYEN kutuların hafızasını
+    # siler. Giriş/çıkış düğmeleri kenar çubuğunda st.rerun() çağırdığı için
+    # sayfa tam o noktada yarıda kesiliyor, aşağıdaki seçim kutuları o turda
+    # hiç çizilmiyor ve Streamlit "kullanılmıyor" sanıp seçimleri siliyordu.
+    # Sonuç: giriş yapıldığı anda seçili deneme kayboluyor, PDF ve işaretlenen
+    # cevaplar ekrandan siliniyordu. Çözüm: seçimleri, kutunun kendi
+    # anahtarının YANINDA ayrı birer "gölge" kayıtta da tutmak -- bu kayıtlar
+    # kutu olmadığı için asla silinmiyor ve seçim buradan geri yükleniyor.
     categories = db.get_categories()
     col_a, col_b = st.columns([1, 2])
     with col_a:
-        selected_cat = st.selectbox("Kategori", categories, key="solve_cat")
+        _cat_prev = st.session_state.get("_solve_cat_val")
+        _cat_index = categories.index(_cat_prev) if _cat_prev in categories else 0
+        selected_cat = st.selectbox("Kategori", categories, index=_cat_index, key="solve_cat")
+    st.session_state["_solve_cat_val"] = selected_cat
     exams = db.get_exams(category=selected_cat)
     with col_b:
         if exams:
@@ -453,12 +523,16 @@ with tabs[0]:
             # düşülmesin diye başta hiçbir deneme seçili gelmiyor; öğrenci
             # bilinçli olarak bir deneme seçmeden PDF/Optik Form görünmüyor.
             options = [None] + list(exam_titles.keys())
+            _ex_prev = st.session_state.get("_solve_exam_val")
+            _ex_index = options.index(_ex_prev) if _ex_prev in options else 0
             selected_exam_id = st.selectbox(
                 "Çözmek İstediğiniz Denemeyi Seçin",
                 options,
+                index=_ex_index,
                 format_func=lambda x: "— Bir deneme seçin —" if x is None else exam_titles[x],
                 key="solve_exam",
             )
+            st.session_state["_solve_exam_val"] = selected_exam_id
         else:
             selected_exam_id = None
             st.info("Bu kategoride henüz bir deneme yok. Admin panelinden ekleyin.")
@@ -536,9 +610,23 @@ with tabs[0]:
                         "internet kesilirse tekrar açtığınızda kaldığınız yerden devam edebilirsiniz."
                     )
                 else:
-                    st.warning("Sonucunuzun kaydedilmesi için önce soldaki menüden giriş yapın veya hesap oluşturun.")
+                    st.warning(
+                        "Şu an kimse giriş yapmadığı için sonuç KAYDEDİLEMEZ. Soldaki menüden "
+                        "giriş yapın; işaretlediğiniz cevaplar kaybolmaz, giriş yaptıktan sonra "
+                        "olduğu gibi durmaya devam eder."
+                    )
 
-                saved = db.load_progress(selected_exam_id, student_name, attempt_no) or {}
+                # ÖNEMLİ - CEVAP KAYBI: Öğrenci giriş yapmadan işaretlediği
+                # cevaplar veritabanına yazılamıyordu ve giriş yapıldığı anda
+                # kayboluyordu. Artık cevaplar giriş durumundan BAĞIMSIZ olarak
+                # her durumda oturum belleğinde de tutuluyor; giriş yapılınca
+                # oradan geri yükleniyor.
+                buf_key = f"_ans_buf_{selected_exam_id}_{attempt_no}"
+                saved = (
+                    st.session_state.get(buf_key)
+                    or db.load_progress(selected_exam_id, student_name, attempt_no)
+                    or {}
+                )
 
                 all_subjects = [
                     (section, subject)
@@ -572,6 +660,9 @@ with tabs[0]:
                                 answers.append(ans)
                             user_answers[section][subject] = answers
 
+                # Giriş yapılmış olsun ya da olmasın, cevaplar her zaman
+                # oturum belleğine yazılır (bkz. yukarıdaki buf_key notu).
+                st.session_state[buf_key] = user_answers
                 if student_name:
                     db.save_progress(selected_exam_id, student_name, attempt_no, user_answers)
 
@@ -584,8 +675,9 @@ with tabs[0]:
 
                 if submitted and not student_name:
                     st.error(
-                        "Sonucunuzun kaydedilebilmesi için önce soldaki menüden giriş yapmanız "
-                        "veya hesap oluşturmanız gerekiyor. Giriş yaptıktan sonra sınavı tekrar bitirin."
+                        "Sonuç kaydedilemedi: önce soldaki menüden giriş yapmanız gerekiyor. "
+                        "**İşaretlediğiniz cevaplar duruyor** — giriş yaptıktan sonra bu düğmeye "
+                        "tekrar basmanız yeterli."
                     )
                 elif submitted:
                     per_subject, total_net, weighted_score = scoring.score_exam(
@@ -597,6 +689,7 @@ with tabs[0]:
                         weighted_score, answers_detail=answers_detail, attempt_no=attempt_no,
                     )
                     db.clear_progress(selected_exam_id, student_name, attempt_no)
+                    st.session_state.pop(buf_key, None)
                     st.success("Sınav tamamlandı! Sonuçlarınız kaydedildi.")
                     st.rerun()
 
@@ -848,38 +941,67 @@ if st.session_state.is_admin:
 
         # ---------------- Otomatik indirme (EBA) ----------------
         elif admin_section == "Otomatik İndirme (Resmi EBA Arşivi)":
+            _ready = bot.available_years()
             st.markdown(
-                "Yıl girerek resmi MEB/EBA arşivinden **8. Sınıf LGS** Sözel+Sayısal kitapçıklarını "
-                "otomatik indirip işlemeyi dener. Birden fazla yıl için aralık girebilirsiniz "
-                "(örn: 2022-2026), sistem her yılı sırayla indirip ekler."
+                "Yıl girerek resmi MEB arşivinden **8. Sınıf LGS** Sözel+Sayısal kitapçıklarını "
+                "otomatik indirip işler. Birden fazla yıl için aralık girebilirsiniz "
+                "(örn: **2018-2025**), sistem her yılı sırayla indirip ekler. "
+                "**Daha önce eklenmiş yıllar tekrar indirilmez, otomatik atlanır.**"
             )
-            year_range = st.text_input("Yıl veya yıl aralığı", value=str(datetime.now().year))
+            st.info(
+                "Adresi doğrulanmış ve hazır olan yıllar: **"
+                + ", ".join(str(y) for y in _ready)
+                + "**. Listede olmayan yıllar için sistem önce kaynak sayfayı canlı tarar, "
+                "sonra EBA adres kalıbını dener."
+            )
+            year_range = st.text_input(
+                "Yıl veya yıl aralığı",
+                value=f"{min(_ready)}-{max(_ready)}" if _ready else str(datetime.now().year),
+            )
             if st.button("İndir ve İşle", type="primary"):
                 years = []
-                if "-" in year_range:
-                    a, b = year_range.split("-")
-                    years = list(range(int(a.strip()), int(b.strip()) + 1))
-                else:
-                    years = [int(year_range.strip())]
+                try:
+                    if "-" in year_range:
+                        a, b = year_range.split("-")
+                        years = list(range(int(a.strip()), int(b.strip()) + 1))
+                    else:
+                        years = [int(year_range.strip())]
+                except ValueError:
+                    st.error("Yılı '2023' veya '2018-2025' biçiminde yazın.")
+                    years = []
 
                 sozel_subjects = [(n, c) for n, c, _ in LGS_SUBJECTS["Sözel"]]
                 sayisal_subjects = [(n, c) for n, c, _ in LGS_SUBJECTS["Sayısal"]]
                 _eba_flashes = []
 
+                # Kaynak sayfayi bir kez tarayip tum yillar icin kullaniyoruz
+                # (her yil icin tekrar tekrar indirmemek adina).
+                _scraped = {}
+                if years:
+                    with st.spinner("Kaynak sayfa taranıyor..."):
+                        _scraped = bot.scrape_source_page()
+
                 for yil in years:
                     exam_title = f"{yil} LGS (Resmi Arşiv)"
                     if db.exam_exists(exam_title, LGS_CATEGORY):
-                        st.info(f"{yil}: zaten sistemde, atlandı.")
+                        _eba_flashes.append(("success", f"↩️ {yil}: zaten sistemde, tekrar indirilmedi."))
                         continue
                     with st.spinner(f"{yil} indiriliyor..."):
-                        res = bot.fetch_lgs_year(yil, PDF_DIR)
+                        res = bot.fetch_lgs_year(yil, PDF_DIR, scraped=_scraped)
                     if not res["Sözel"] or not res["Sayısal"]:
-                        st.error(f"{yil}: indirilemedi. " + " | ".join(res["hatalar"]))
+                        _eba_flashes.append((
+                            "error",
+                            f"❌ {yil}: indirilemedi. " + " | ".join(res["hatalar"][:3]),
+                        ))
                         continue
                     sozel_key, sozel_msg, sozel_idx = parsing.extract_answer_key(res["Sözel"], sozel_subjects)
                     sayisal_key, sayisal_msg, sayisal_idx = parsing.extract_answer_key(res["Sayısal"], sayisal_subjects)
                     if sozel_key is None or sayisal_key is None:
-                        st.error(f"{yil}: indirildi ama cevap anahtarı otomatik okunamadı ({sozel_msg or sayisal_msg}). Manuel yüklemeyi deneyin.")
+                        _eba_flashes.append((
+                            "error",
+                            f"⚠️ {yil}: indirildi ama cevap anahtarı otomatik okunamadı "
+                            f"({sozel_msg or sayisal_msg}). Manuel yüklemeyi deneyin.",
+                        ))
                         continue
                     safe_path = os.path.join(PDF_DIR, f"{yil}_LGS_guvenli.pdf")
                     with st.spinner(f"{yil}: PDF hazırlanıyor ve küçültülüyor, bu birkaç saniye sürebilir..."):
