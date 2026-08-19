@@ -35,6 +35,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 PDF_DIR = os.path.join(STATIC_DIR, config.PDF_DIR_NAME)
 os.makedirs(PDF_DIR, exist_ok=True)
+# ÖNEMLİ - GÜVENLİK: Cevap anahtarı DAHİL orijinal PDF'ler kesinlikle "static"
+# klasörünün DIŞINDA tutulur. "static" klasörü Streamlit tarafından herkese
+# açık bir URL üzerinden sunulur (enableStaticServing=true); dosya adı tahmin
+# edilebilirse (ör. deneme başlığından türetilmiş "slug") admin paneline hiç
+# girmeden cevap anahtarlı PDF'e ulaşılabilir. Bu yüzden orijinal PDF'ler
+# static'in dışındaki bu özel klasörde tutulup show_pdf() ile HER ZAMAN
+# base64 gömme yöntemiyle (yani sadece admin paneli üzerinden, dogrudan URL
+# olmadan) gösterilir.
+PRIVATE_DIR = os.path.join(BASE_DIR, "private_pdfs")
+os.makedirs(PRIVATE_DIR, exist_ok=True)
 
 db.init_db()
 db.ensure_default_admin(config.ADMIN_USERNAME, "Yönetici", config.ADMIN_PASSWORD)
@@ -441,7 +451,14 @@ if st.session_state.is_admin:
                                      (sayisal_pdf, parsing.pdf_page_count(sayisal_pdf) - 1)],
                                     safe_path,
                                 )
-                                db.add_exam(exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE, manual_key, source="manuel-elle-cevap")
+                                orig_path = os.path.join(
+                                    PRIVATE_DIR,f"{slugify(exam_title, 'deneme')}_orijinal.pdf"
+                                )
+                                parsing.merge_full([sozel_pdf, sayisal_pdf], orig_path)
+                                db.add_exam(
+                                    exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE, manual_key,
+                                    source="manuel-elle-cevap", pdf_path_original=orig_path,
+                                )
                                 st.success(f"'{exam_title}' kaydedildi.")
                                 st.rerun()
                     else:
@@ -449,8 +466,15 @@ if st.session_state.is_admin:
                         parsing.crop_and_merge(
                             [(sozel_pdf, sozel_idx), (sayisal_pdf, sayisal_idx)], safe_path
                         )
+                        orig_path = os.path.join(
+                            PRIVATE_DIR,f"{slugify(exam_title, 'deneme')}_orijinal.pdf"
+                        )
+                        parsing.merge_full([sozel_pdf, sayisal_pdf], orig_path)
                         final_key = {"Sözel": sozel_key, "Sayısal": sayisal_key}
-                        db.add_exam(exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE, final_key, source="otomatik-ayrıştırma")
+                        db.add_exam(
+                            exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE, final_key,
+                            source="otomatik-ayrıştırma", pdf_path_original=orig_path,
+                        )
                         st.success(f"✅ '{exam_title}' başarıyla işlendi ve sisteme eklendi! Cevap anahtarı otomatik okundu ve son sayfalar gizlendi.")
                         st.balloons()
 
@@ -526,13 +550,16 @@ if st.session_state.is_admin:
                         final_key = {"Genel": manual_answers}
 
                     safe_title = slugify(title, "test")
+                    orig_path = None
                     if uploaded:
                         idx = st.session_state.get("_gen_key_idx")
                         safe_path = os.path.join(PDF_DIR, f"{safe_title}_guvenli.pdf")
                         parsing.crop_and_merge([(uploaded, idx if idx is not None else parsing.pdf_page_count(uploaded) - 1)], safe_path)
+                        orig_path = os.path.join(PRIVATE_DIR,f"{safe_title}_orijinal.pdf")
+                        parsing.merge_full([uploaded], orig_path)
                     else:
                         safe_path = ""  # PDF yok, sadece cevap anahtarı / metin bazlı çalışılabilir
-                    db.add_exam(title, gcat, safe_path, structure, final_key, source="manuel")
+                    db.add_exam(title, gcat, safe_path, structure, final_key, source="manuel", pdf_path_original=orig_path)
                     st.success(f"'{title}' {gcat} kategorisine eklendi.")
                     st.rerun()
 
@@ -572,7 +599,13 @@ if st.session_state.is_admin:
                         continue
                     safe_path = os.path.join(PDF_DIR, f"{yil}_LGS_guvenli.pdf")
                     parsing.crop_and_merge([(res["Sözel"], sozel_idx), (res["Sayısal"], sayisal_idx)], safe_path)
-                    db.add_exam(exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE, {"Sözel": sozel_key, "Sayısal": sayisal_key}, source="otomatik-eba")
+                    orig_path = os.path.join(PRIVATE_DIR,f"{yil}_LGS_orijinal.pdf")
+                    parsing.merge_full([res["Sözel"], res["Sayısal"]], orig_path)
+                    db.add_exam(
+                        exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE,
+                        {"Sözel": sozel_key, "Sayısal": sayisal_key}, source="otomatik-eba",
+                        pdf_path_original=orig_path,
+                    )
                     st.success(f"✅ {yil}: eklendi.")
                 st.rerun()
 
@@ -627,6 +660,12 @@ if st.session_state.is_admin:
                 if c3.button("Sil", key=f"del_{e['id']}"):
                     db.delete_exam(e["id"])
                     st.rerun()
+                if e.get("pdf_path_original") and os.path.exists(e["pdf_path_original"]):
+                    with st.expander(f"🔓 Orijinal PDF'i görüntüle (cevap anahtarı DAHİL — sadece siz görürsünüz)"):
+                        st.warning("Bu, cevap anahtarını içeren tam PDF'tir. Öğrenciyle ekranı paylaşmayın.")
+                        show_pdf(e["pdf_path_original"], height=600)
+                else:
+                    st.caption("Bu deneme için orijinal PDF kaydı yok (eski kayıt ya da elle girilmiş cevap anahtarı).")
 
         # ---------------- Öğrenci şifrelerini yönet ----------------
         elif admin_section == "Öğrenci Şifrelerini Yönet":
@@ -640,6 +679,20 @@ if st.session_state.is_admin:
             else:
                 for s in students:
                     with st.expander(f"👤 {s['display_name']}  (kullanıcı adı: {s['username']})"):
+                        st.markdown("**Kullanıcı adını değiştir**")
+                        new_username = st.text_input(
+                            "Yeni kullanıcı adı", value=s["username"], key=f"newuser_{s['username']}"
+                        )
+                        if st.button("Kullanıcı Adını Güncelle", key=f"renamebtn_{s['username']}"):
+                            ok, msg = db.rename_student(s["username"], new_username)
+                            if ok:
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+
+                        st.divider()
+                        st.markdown("**Şifreyi sıfırla**")
                         new_pw = st.text_input(
                             "Yeni şifre", type="password", key=f"newpw_{s['username']}"
                         )
@@ -719,8 +772,31 @@ if st.session_state.is_admin:
                             else:
                                 st.caption("Bu sınav için soru bazlı dökum kaydedilmemiş (eski kayıt).")
 
-        # ---------------- Hesap ayarları (admin şifresi) ----------------
+        # ---------------- Hesap ayarları (admin kullanıcı adı / şifre) ----------------
         elif admin_section == "Hesap Ayarları":
+            st.markdown("#### Kullanıcı adını değiştir")
+            st.caption("Kullanıcı adınızı değiştirmek için mevcut şifrenizi girmeniz gerekir.")
+            cur_username_display = st.session_state.get("admin_username", config.ADMIN_USERNAME)
+            st.text_input("Mevcut kullanıcı adı", value=cur_username_display, disabled=True, key="acc_cur_username_display")
+            new_username = st.text_input("Yeni kullanıcı adı", key="acc_new_username")
+            cur_pw_for_username = st.text_input("Mevcut şifre", type="password", key="acc_cur_pw_for_username")
+            if st.button("Kullanıcı Adını Değiştir", type="primary", key="acc_change_username_btn"):
+                if not new_username.strip():
+                    st.error("Yeni kullanıcı adı boş olamaz.")
+                else:
+                    ok, msg = db.change_admin_username(
+                        cur_username_display, cur_pw_for_username, new_username.strip()
+                    )
+                    if ok:
+                        st.session_state.admin_username = new_username.strip()
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+            st.divider()
+
+            st.markdown("#### Şifreyi değiştir")
             st.markdown("Yönetici şifrenizi buradan değiştirebilirsiniz.")
             cur_pw = st.text_input("Mevcut şifre", type="password", key="acc_cur_pw")
             new_pw = st.text_input("Yeni şifre", type="password", key="acc_new_pw")

@@ -88,10 +88,14 @@ def init_db():
     for cat in DEFAULT_CATEGORIES:
         c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
 
-    # Eski veritabanlarında olmayabilecek sütunu güvenli şekilde ekle
+    # Eski veritabanlarında olmayabilecek sütunları güvenli şekilde ekle
     # (var olan bir kuruluma dokunmadan yükseltme yapabilmek için).
     try:
         c.execute("ALTER TABLE results ADD COLUMN answers_detail TEXT")
+    except sqlite3.OperationalError:
+        pass  # sütun zaten var
+    try:
+        c.execute("ALTER TABLE exams ADD COLUMN pdf_path_original TEXT")
     except sqlite3.OperationalError:
         pass  # sütun zaten var
 
@@ -121,6 +125,16 @@ def create_student(username, display_name, password):
     if exists:
         conn.close()
         return False, "Bu kullanıcı adı zaten alınmış, başka bir tane deneyin."
+    name_exists = conn.execute(
+        "SELECT 1 FROM students WHERE LOWER(display_name) = LOWER(?)", (display_name,)
+    ).fetchone()
+    if name_exists:
+        conn.close()
+        return False, (
+            f"'{display_name}' adında zaten kayıtlı bir hesap var. Aynı kişiyseniz "
+            "mevcut hesapla giriş yapın; farklı kişiyseniz adınıza soyadınızın "
+            "bir kısmını ya da bir rakam ekleyerek ayırt edici hale getirin."
+        )
     salt, pw_hash = _hash_password(password)
     conn.execute(
         """INSERT INTO students (username, display_name, salt, password_hash, created_at)
@@ -181,6 +195,52 @@ def change_admin_password(username, current_password, new_password):
     conn.commit()
     conn.close()
     return True, "Şifre güncellendi."
+
+
+def rename_student(old_username, new_username):
+    """Bir öğrencinin kullanıcı adını değiştirir (görünen ad aynı kalır).
+    Sonuç geçmişi de (results.student_name) otomatik olarak yeni ada taşınır."""
+    old_username = (old_username or "").strip().lower().replace(" ", "_")
+    new_username = (new_username or "").strip().lower().replace(" ", "_")
+    if not new_username:
+        return False, "Yeni kullanıcı adı boş olamaz."
+    conn = get_conn()
+    exists_old = conn.execute("SELECT 1 FROM students WHERE username = ?", (old_username,)).fetchone()
+    if not exists_old:
+        conn.close()
+        return False, "Bu öğrenci bulunamadı."
+    if new_username != old_username:
+        exists_new = conn.execute("SELECT 1 FROM students WHERE username = ?", (new_username,)).fetchone()
+        if exists_new:
+            conn.close()
+            return False, "Bu kullanıcı adı zaten başka bir öğrenci tarafından kullanılıyor."
+    conn.execute("UPDATE students SET username = ? WHERE username = ?", (new_username, old_username))
+    conn.execute("UPDATE results SET student_name = ? WHERE student_name = ?", (new_username, old_username))
+    conn.commit()
+    conn.close()
+    return True, "Kullanıcı adı güncellendi."
+
+
+def change_admin_username(current_username, current_password, new_username):
+    """Yöneticinin kullanıcı adını değiştirir -- mevcut şifreyle doğrular."""
+    admin = verify_admin(current_username, current_password)
+    if not admin:
+        return False, "Mevcut şifre yanlış."
+    new_username = (new_username or "").strip().lower().replace(" ", "_")
+    if not new_username:
+        return False, "Yeni kullanıcı adı boş olamaz."
+    conn = get_conn()
+    if new_username != admin["username"]:
+        exists = conn.execute("SELECT 1 FROM admins WHERE username = ?", (new_username,)).fetchone()
+        if exists:
+            conn.close()
+            return False, "Bu kullanıcı adı zaten kullanılıyor."
+    conn.execute(
+        "UPDATE admins SET username = ? WHERE username = ?", (new_username, admin["username"])
+    )
+    conn.commit()
+    conn.close()
+    return True, "Kullanıcı adı güncellendi."
 
 
 def get_students():
@@ -255,12 +315,12 @@ def add_category(name):
 
 # ---------- exams ----------
 
-def add_exam(title, category, pdf_path, structure, answer_key, source="manuel"):
+def add_exam(title, category, pdf_path, structure, answer_key, source="manuel", pdf_path_original=None):
     conn = get_conn()
     c = conn.cursor()
     c.execute(
-        """INSERT INTO exams (title, category, source, pdf_path, structure, answer_key, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO exams (title, category, source, pdf_path, structure, answer_key, created_at, pdf_path_original)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             title,
             category,
@@ -269,6 +329,7 @@ def add_exam(title, category, pdf_path, structure, answer_key, source="manuel"):
             json.dumps(structure, ensure_ascii=False),
             json.dumps(answer_key, ensure_ascii=False),
             datetime.now().isoformat(timespec="seconds"),
+            pdf_path_original,
         ),
     )
     conn.commit()

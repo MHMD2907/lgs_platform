@@ -128,6 +128,25 @@ def crop_and_merge(file_specs, output_path):
     return output_path
 
 
+def merge_full(file_specs, output_path):
+    """file_specs: [dosya_yolu_veya_buffer, ...] -- HİÇBİR SAYFAYI KIRPMADAN
+    dosyaları tek bir PDF'te birleştirir (cevap anahtarı sayfaları dahil).
+    Bu, sadece ADMIN'in daha sonra orijinali görüntüleyebilmesi için kullanılır;
+    öğrenciye gösterilen PDF her zaman crop_and_merge() ile üretilen temiz
+    (kırpılmış) sürümdür."""
+    writer = PdfWriter()
+    for src in file_specs:
+        if hasattr(src, "seek"):
+            src.seek(0)
+        reader = PdfReader(src)
+        for page in reader.pages:
+            writer.add_page(page)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "wb") as f_out:
+        writer.write(f_out)
+    return output_path
+
+
 def pdf_page_count(file_obj_or_path):
     if hasattr(file_obj_or_path, "seek"):
         file_obj_or_path.seek(0)
