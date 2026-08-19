@@ -94,33 +94,31 @@ def slugify(title, fallback="test"):
 
 def _pdf_src(path):
     """PDF'i tarayicida gostermek icin kullanilacak 'src' adresini uretir.
-    static/ klasoru altindaysa dogrudan URL (hizli, buyuk dosyalarda
-    guvenilir); degilse (orn. gizli orijinal PDF'ler) base64 gomme."""
-    abs_path = os.path.abspath(path)
-    static_root = os.path.abspath(STATIC_DIR) + os.sep
-    if abs_path.startswith(static_root):
-        rel = os.path.relpath(abs_path, STATIC_DIR).replace(os.sep, "/")
-        return f"app/static/{quote(rel)}"
+    ONEMLI: Streamlit Cloud'da 'static' klasorunu dogrudan URL'den sunma
+    ozelliginin (enableStaticServing) her zaman guvenilir calistigi
+    dogrulanamadigi icin (bos/beyaz sayfa gozlemlendi), HER PDF -- boyutu ne
+    olursa olsun -- guvenilir sekilde calisan base64 gomme yontemiyle
+    gosterilir. Bu, sunucu ayarina bagimli olmadigi icin daha yavas ama
+    daha saglam bir yontemdir."""
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
     return f"data:application/pdf;base64,{b64}"
 
 
 def show_pdf(path, height=780):
-    """PDF'i hem satir ici (iframe) onizleme olarak, hem de -- baz tarayicilar
-    ozellikle tabletlerde iframe icinde PDF gostermeyi reddedebildigi icin --
-    HER ZAMAN calisan 'yeni sekmede ac' baglantisiyla birlikte gosterir."""
+    """PDF'i satir ici (iframe) onizleme olarak gosterir; ogrenci sinav
+    cozerken sekmeler arasi gecis yapmak zorunda kalmasin diye bu ANA
+    gorunumdur. Bazi tarayicilarda iframe icinde PDF gosterimi calismazsa
+    diye altina kucuk, ikincil bir 'yeni sekmede ac' baglantisi da eklenir."""
     src = _pdf_src(path)
-    st.markdown(
-        f'<a href="{src}#view=FitH" target="_blank" rel="noopener" '
-        f'style="display:inline-block;margin-bottom:8px;padding:8px 14px;'
-        f'background:#2563EB;color:#fff;border-radius:8px;text-decoration:none;'
-        f'font-weight:600;">📄 PDF\'i yeni sekmede aç</a>',
-        unsafe_allow_html=True,
-    )
     st.markdown(
         f'<iframe src="{src}#view=FitH" '
         f'width="100%" height="{height}px" style="border:1px solid #e2e8f0;border-radius:12px;"></iframe>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<a href="{src}#view=FitH" target="_blank" rel="noopener" '
+        f'style="font-size:0.85rem;">📄 PDF ekranda görünmüyorsa buraya tıklayıp yeni sekmede açın</a>',
         unsafe_allow_html=True,
     )
 
@@ -188,7 +186,13 @@ if "student_display_name" not in st.session_state:
     st.session_state.student_display_name = ""  # login sonrası: ekranda gösterilecek ad
 
 def render_student_login_form():
-    login_user = st.text_input("Kullanıcı Adı", key="login_user")
+    # Admin kullanıcı adı kutusu gibi, kayıtlı TEK bir öğrenci varsa (tipik
+    # kullanım: tek çocuk) kullanıcı adını otomatik dolduruyoruz; birden
+    # fazla öğrenci kayıtlıysa hangisi olduğunu tahmin edemeyeceğimiz için
+    # boş bırakıyoruz.
+    _students = db.get_students()
+    _default_user = _students[0]["username"] if len(_students) == 1 else ""
+    login_user = st.text_input("Kullanıcı Adı", value=_default_user, key="login_user")
     login_pw = st.text_input("Şifre", type="password", key="login_pw")
     if st.button("Giriş Yap", key="student_login_btn", type="primary", use_container_width=True):
         student = db.verify_student(login_user, login_pw)
@@ -269,6 +273,8 @@ tabs = st.tabs(tab_names)
 
 # ================================================================= TAB: SINAV ÇÖZ
 with tabs[0]:
+    st.markdown("### 📱 Sınav Çöz")
+    st.caption("Aşağıdan bir kategori ve deneme seçerek başlayın.")
     categories = db.get_categories()
     col_a, col_b = st.columns([1, 2])
     with col_a:
@@ -277,10 +283,14 @@ with tabs[0]:
     with col_b:
         if exams:
             exam_titles = {e["id"]: e["title"] for e in exams}
+            # Sayfa açılır açılmaz otomatik olarak bir sınavın içine
+            # düşülmesin diye başta hiçbir deneme seçili gelmiyor; öğrenci
+            # bilinçli olarak bir deneme seçmeden PDF/Optik Form görünmüyor.
+            options = [None] + list(exam_titles.keys())
             selected_exam_id = st.selectbox(
                 "Çözmek İstediğiniz Denemeyi Seçin",
-                list(exam_titles.keys()),
-                format_func=lambda x: exam_titles[x],
+                options,
+                format_func=lambda x: "— Bir deneme seçin —" if x is None else exam_titles[x],
                 key="solve_exam",
             )
         else:
@@ -309,10 +319,20 @@ with tabs[0]:
 
         with col_pdf:
             st.subheader(exam["title"])
-            if os.path.exists(exam["pdf_path"]):
-                show_pdf(exam["pdf_path"])
+            pdf_path = exam["pdf_path"]
+            if not os.path.exists(pdf_path):
+                st.error(
+                    "PDF dosyası sunucuda bulunamadı. Bu deneme muhtemelen bir önceki "
+                    "yayına almadan (deploy) kalan bir kayıt; admin panelinden silip "
+                    "yeniden eklemeniz gerekebilir."
+                )
+            elif os.path.getsize(pdf_path) == 0:
+                st.error("PDF dosyası boş (0 byte) kaydedilmiş. Denemeyi silip yeniden eklemeniz gerekiyor.")
             else:
-                st.error("PDF dosyası bulunamadı.")
+                try:
+                    show_pdf(pdf_path)
+                except Exception as e:
+                    st.error(f"PDF gösterilirken bir hata oluştu: {e}")
 
         with col_form:
             if existing_result:
