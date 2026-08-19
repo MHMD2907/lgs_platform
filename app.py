@@ -37,6 +37,7 @@ PDF_DIR = os.path.join(STATIC_DIR, config.PDF_DIR_NAME)
 os.makedirs(PDF_DIR, exist_ok=True)
 
 db.init_db()
+db.ensure_default_admin(config.ADMIN_USERNAME, "Yönetici", config.ADMIN_PASSWORD)
 
 # --- 8. Sınıf LGS için resmi ders/soru sayısı/katsayı yapısı (sabit) ---
 LGS_SUBJECTS = {
@@ -149,65 +150,84 @@ if "student_name" not in st.session_state:
 if "student_display_name" not in st.session_state:
     st.session_state.student_display_name = ""  # login sonrası: ekranda gösterilecek ad
 
+def render_student_login_form():
+    login_user = st.text_input("Kullanıcı Adı", key="login_user")
+    login_pw = st.text_input("Şifre", type="password", key="login_pw")
+    if st.button("Giriş Yap", key="student_login_btn", type="primary", use_container_width=True):
+        student = db.verify_student(login_user, login_pw)
+        if student:
+            st.session_state.student_name = student["username"]
+            st.session_state.student_display_name = student["display_name"]
+            st.rerun()
+        else:
+            st.error("Kullanıcı adı veya şifre yanlış.")
+
+    with st.expander("🆕 Hesabınız yok mu? Kayıt olun"):
+        reg_display = st.text_input("Adınız Soyadınız", key="reg_display")
+        reg_user = st.text_input("Kullanıcı Adı", key="reg_user", help="Boşluksuz, Türkçe karaktersiz olması önerilir.")
+        reg_pw = st.text_input("Şifre", type="password", key="reg_pw")
+        reg_pw2 = st.text_input("Şifre (tekrar)", type="password", key="reg_pw2")
+        if st.button("Hesap Oluştur", key="register_btn", use_container_width=True):
+            if reg_pw != reg_pw2:
+                st.error("Girdiğiniz şifreler birbiriyle eşleşmiyor.")
+            elif len(reg_pw) < 4:
+                st.error("Şifre en az 4 karakter olmalı.")
+            else:
+                ok, msg = db.create_student(reg_user, reg_display, reg_pw)
+                if ok:
+                    st.success(msg + " Şimdi yukarıdaki kutulardan giriş yapabilirsiniz.")
+                else:
+                    st.error(msg)
+
+
+def render_admin_login_form():
+    admin_user = st.text_input("Kullanıcı Adı", key="admin_user", value=config.ADMIN_USERNAME)
+    admin_pw = st.text_input("Şifre", type="password", key="admin_pw")
+    if st.button("Giriş Yap", key="admin_login_btn", type="primary", use_container_width=True):
+        admin = db.verify_admin(admin_user, admin_pw)
+        if admin:
+            st.session_state.is_admin = True
+            st.session_state.admin_username = admin["username"]
+            st.rerun()
+        elif not admin_pw:
+            st.error("Şifre alanı boş. Önce şifreyi girin.")
+        else:
+            st.error("Kullanıcı adı veya şifre yanlış.")
+
+
 with st.sidebar:
     st.markdown(f"### 📚 {config.APP_TITLE}")
 
-    if not st.session_state.student_name:
-        st.subheader("👤 Öğrenci Girişi")
-        login_user = st.text_input("Kullanıcı Adı", key="login_user")
-        login_pw = st.text_input("Şifre", type="password", key="login_pw")
-        if st.button("Giriş Yap", key="student_login_btn", type="primary", use_container_width=True):
-            student = db.verify_student(login_user, login_pw)
-            if student:
-                st.session_state.student_name = student["username"]
-                st.session_state.student_display_name = student["display_name"]
+    if not st.session_state.student_name and not st.session_state.is_admin:
+        login_type = st.selectbox("Giriş türü", ["Öğrenci", "Yönetici"], key="login_type")
+        st.divider()
+        if login_type == "Öğrenci":
+            st.subheader("👤 Öğrenci Girişi")
+            render_student_login_form()
+        else:
+            st.subheader("⚙️ Yönetici Girişi")
+            render_admin_login_form()
+    else:
+        if st.session_state.student_name:
+            st.success(f"Hoş geldin, {st.session_state.student_display_name}! 👋")
+            if st.button("Çıkış Yap", key="student_logout_btn", use_container_width=True):
+                st.session_state.student_name = ""
+                st.session_state.student_display_name = ""
                 st.rerun()
-            else:
-                st.error("Kullanıcı adı veya şifre yanlış.")
+        else:
+            with st.expander("👤 Öğrenci Girişi"):
+                render_student_login_form()
 
-        with st.expander("🆕 Hesabınız yok mu? Kayıt olun"):
-            reg_display = st.text_input("Adınız Soyadınız", key="reg_display")
-            reg_user = st.text_input("Kullanıcı Adı", key="reg_user", help="Boşluksuz, Türkçe karaktersiz olması önerilir.")
-            reg_pw = st.text_input("Şifre", type="password", key="reg_pw")
-            reg_pw2 = st.text_input("Şifre (tekrar)", type="password", key="reg_pw2")
-            if st.button("Hesap Oluştur", key="register_btn", use_container_width=True):
-                if reg_pw != reg_pw2:
-                    st.error("Girdiğiniz şifreler birbiriyle eşleşmiyor.")
-                elif len(reg_pw) < 4:
-                    st.error("Şifre en az 4 karakter olmalı.")
-                else:
-                    ok, msg = db.create_student(reg_user, reg_display, reg_pw)
-                    if ok:
-                        st.success(msg + " Şimdi yukarıdaki kutulardan giriş yapabilirsiniz.")
-                    else:
-                        st.error(msg)
-    else:
-        st.success(f"Hoş geldin, {st.session_state.student_display_name}! 👋")
-        if st.button("Çıkış Yap", key="student_logout_btn", use_container_width=True):
-            st.session_state.student_name = ""
-            st.session_state.student_display_name = ""
-            st.rerun()
+        st.divider()
 
-    st.divider()
-    if not st.session_state.is_admin:
-        with st.expander("⚙️ Yönetici Girişi"):
-            pw = st.text_input("Şifre", type="password", key="admin_pw")
-            if st.button("Giriş Yap"):
-                if pw.strip() == config.ADMIN_PASSWORD.strip():
-                    st.session_state.is_admin = True
-                    st.rerun()
-                elif not pw:
-                    st.error("Şifre alanı boş. Önce şifreyi girin.")
-                else:
-                    st.error(
-                        f"Şifre yanlış. (config.py içindeki ADMIN_PASSWORD ile eşleşmiyor — "
-                        f"dosyayı düzenlediyseniz uygulamayı BASLAT.bat ile yeniden başlattığınızdan emin olun.)"
-                    )
-    else:
-        st.success("Yönetici olarak giriş yaptınız.")
-        if st.button("Çıkış Yap"):
-            st.session_state.is_admin = False
-            st.rerun()
+        if st.session_state.is_admin:
+            st.success("Yönetici olarak giriş yaptınız.")
+            if st.button("Çıkış Yap", key="admin_logout_btn", use_container_width=True):
+                st.session_state.is_admin = False
+                st.rerun()
+        else:
+            with st.expander("⚙️ Yönetici Girişi"):
+                render_admin_login_form()
 
 tab_names = ["📱 Sınav Çöz", "📊 Gelişim Raporum"]
 if st.session_state.is_admin:
@@ -287,8 +307,10 @@ with tabs[0]:
                 per_subject, total_net, weighted_score = scoring.score_exam(
                     user_answers, answer_key, structure
                 )
+                answers_detail = scoring.build_answer_detail(user_answers, answer_key, structure)
                 db.add_result(
-                    selected_exam_id, st.session_state.student_name, per_subject, total_net, weighted_score
+                    selected_exam_id, st.session_state.student_name, per_subject, total_net,
+                    weighted_score, answers_detail=answers_detail,
                 )
 
                 st.success("Sınav tamamlandı! Sonuçlarınız aşağıda ve 'Gelişim Raporum' sekmesinde kaydedildi.")
@@ -353,6 +375,8 @@ if st.session_state.is_admin:
                 "Google Drive'dan İçe Aktar",
                 "Kayıtlı Denemeler",
                 "Öğrenci Şifrelerini Yönet",
+                "Öğrenci Raporları",
+                "Hesap Ayarları",
             ],
             horizontal=True,
         )
@@ -631,3 +655,84 @@ if st.session_state.is_admin:
                                     st.success(f"{s['display_name']} için şifre güncellendi.")
                                 else:
                                     st.error(msg)
+
+        # ---------------- Öğrenci raporları ----------------
+        elif admin_section == "Öğrenci Raporları":
+            students = db.get_students()
+            if not students:
+                st.info("Henüz kayıtlı öğrenci yok.")
+            else:
+                names = {s["username"]: s["display_name"] for s in students}
+                chosen = st.selectbox(
+                    "Öğrenci seçin",
+                    list(names.keys()),
+                    format_func=lambda u: names[u],
+                    key="report_student_pick",
+                )
+                results = db.get_results(student_name=chosen)
+                if not results:
+                    st.info(f"{names[chosen]} henüz hiç sınav çözmemiş.")
+                else:
+                    nets = [r["total_net"] for r in results]
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Çözülen Test Sayısı", len(results))
+                    c2.metric("Ortalama Net", round(sum(nets) / len(nets), 2))
+                    c3.metric("En Yüksek Net", max(nets))
+
+                    st.divider()
+                    st.markdown("**Sınav Geçmişi**")
+                    for r in results:
+                        title = f"{r['created_at']} · {r['exam_title']} ({r['category']}) · Net: {r['total_net']}"
+                        with st.expander(title):
+                            cols = st.columns(len(r["per_subject"]))
+                            for c, (subj, res) in zip(cols, r["per_subject"].items()):
+                                c.metric(subj, f"Net: {res['net']}", f"D:{res['dogru']} Y:{res['yanlis']} B:{res['bos']}")
+                            if r.get("weighted_score") is not None:
+                                st.caption(f"Tahmini ağırlıklı puan göstergesi: {r['weighted_score']}")
+
+                            detail = r.get("answers_detail")
+                            if detail:
+                                st.markdown("**Soru bazlı dökum**")
+                                for section, subjects in detail.items():
+                                    for subject, rows in subjects.items():
+                                        yanlis_bos = [x for x in rows if x["durum"] != "dogru"]
+                                        if not yanlis_bos:
+                                            st.caption(f"{subject}: tüm sorular doğru! 🎉")
+                                            continue
+                                        df_detail = pd.DataFrame(rows)
+                                        df_detail["durum"] = df_detail["durum"].map(
+                                            {"dogru": "✅ Doğru", "yanlis": "❌ Yanlış", "bos": "⬜ Boş"}
+                                        )
+                                        st.caption(f"{subject}")
+                                        st.dataframe(
+                                            df_detail.rename(
+                                                columns={
+                                                    "soru": "Soru No",
+                                                    "verilen": "Verilen Cevap",
+                                                    "dogru_cevap": "Doğru Cevap",
+                                                    "durum": "Durum",
+                                                }
+                                            ),
+                                            hide_index=True,
+                                            use_container_width=True,
+                                        )
+                            else:
+                                st.caption("Bu sınav için soru bazlı dökum kaydedilmemiş (eski kayıt).")
+
+        # ---------------- Hesap ayarları (admin şifresi) ----------------
+        elif admin_section == "Hesap Ayarları":
+            st.markdown("Yönetici şifrenizi buradan değiştirebilirsiniz.")
+            cur_pw = st.text_input("Mevcut şifre", type="password", key="acc_cur_pw")
+            new_pw = st.text_input("Yeni şifre", type="password", key="acc_new_pw")
+            new_pw2 = st.text_input("Yeni şifre (tekrar)", type="password", key="acc_new_pw2")
+            if st.button("Şifreyi Değiştir", type="primary"):
+                if new_pw != new_pw2:
+                    st.error("Yeni şifreler birbiriyle eşleşmiyor.")
+                else:
+                    ok, msg = db.change_admin_password(
+                        st.session_state.get("admin_username", config.ADMIN_USERNAME), cur_pw, new_pw
+                    )
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)

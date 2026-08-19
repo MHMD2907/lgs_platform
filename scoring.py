@@ -58,6 +58,29 @@ def score_exam(user_answers, answer_key, structure):
     return per_subject, round(total_net, 2), weighted_score
 
 
+def build_answer_detail(user_answers, answer_key, structure):
+    """Soru bazli detay uretir -- admin panelinde 'hangi soruyu bildi/bilemedi'
+    gorunumu icin. Donus: {"Sözel": {"Türkçe": [{"soru":1,"verilen":"A",
+    "dogru_cevap":"A","durum":"dogru"}, ...]}, ...}"""
+    detail = {}
+    for section, subjects in structure.items():
+        detail[section] = {}
+        for subject in subjects:
+            u_list = user_answers.get(section, {}).get(subject, [])
+            k_list = answer_key.get(section, {}).get(subject, [])
+            rows = []
+            for i, (u, k) in enumerate(zip(u_list, k_list), start=1):
+                if u in BOS_ISARETLERI:
+                    durum = "bos"
+                elif u == k:
+                    durum = "dogru"
+                else:
+                    durum = "yanlis"
+                rows.append({"soru": i, "verilen": u, "dogru_cevap": k, "durum": durum})
+            detail[section][subject] = rows
+    return detail
+
+
 def empty_user_answers(structure):
     """Optik formun ilk hali icin bos cevap sozlugu uretir (hepsi 'Boş')."""
     out = {}

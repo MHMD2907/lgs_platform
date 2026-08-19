@@ -26,5 +26,11 @@ except Exception:
     )
     st.stop()
 
+# Bu, yöneticinin İLK kullanıcı adıdır -- sadece hesap ilk oluşturulurken kullanılır.
+# Şifre (ve isterseniz kullanıcı adını da) daha sonra uygulama içinden, Admin
+# Panelindeki "Hesap Ayarları" bölümünden değiştirebilirsiniz; oradan yapılan
+# değişiklik veritabanında saklanır, bu dosyadaki değeri etkilemez.
+ADMIN_USERNAME = st.secrets.get("ADMIN_USERNAME", "admin")
+
 APP_TITLE = "LGS Eğitim Platformu"
 PDF_DIR_NAME = "pdfs"

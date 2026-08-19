@@ -76,8 +76,25 @@ def init_db():
             created_at TEXT NOT NULL
         )"""
     )
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS admins (
+            username TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )"""
+    )
     for cat in DEFAULT_CATEGORIES:
         c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
+
+    # Eski veritabanlarında olmayabilecek sütunu güvenli şekilde ekle
+    # (var olan bir kuruluma dokunmadan yükseltme yapabilmek için).
+    try:
+        c.execute("ALTER TABLE results ADD COLUMN answers_detail TEXT")
+    except sqlite3.OperationalError:
+        pass  # sütun zaten var
+
     conn.commit()
     conn.close()
 
@@ -113,6 +130,57 @@ def create_student(username, display_name, password):
     conn.commit()
     conn.close()
     return True, "Hesap oluşturuldu."
+
+
+def ensure_default_admin(username, display_name, password):
+    """Admins tablosu boşsa, config.py'deki başlangıç bilgileriyle ilk yönetici
+    hesabını oluşturur. Var olan bir yönetici hesabına ASLA dokunmaz -- yani
+    admin panelinden şifre değiştirildikten sonra bu fonksiyon onu geri almaz."""
+    username = (username or "admin").strip().lower().replace(" ", "_")
+    conn = get_conn()
+    exists = conn.execute("SELECT 1 FROM admins WHERE username = ?", (username,)).fetchone()
+    if not exists:
+        salt, pw_hash = _hash_password(password)
+        conn.execute(
+            """INSERT INTO admins (username, display_name, salt, password_hash, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (username, display_name or "Yönetici", salt, pw_hash, datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
+    conn.close()
+
+
+def verify_admin(username, password):
+    username = (username or "").strip().lower().replace(" ", "_")
+    if not username or not password:
+        return None
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM admins WHERE username = ?", (username,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    _, pw_hash = _hash_password(password, row["salt"])
+    if pw_hash == row["password_hash"]:
+        return dict(row)
+    return None
+
+
+def change_admin_password(username, current_password, new_password):
+    """Yöneticinin kendi şifresini değiştirmesi için -- mevcut şifreyi doğrular."""
+    admin = verify_admin(username, current_password)
+    if not admin:
+        return False, "Mevcut şifre yanlış."
+    if not new_password or len(new_password) < 4:
+        return False, "Yeni şifre en az 4 karakter olmalı."
+    salt, pw_hash = _hash_password(new_password)
+    conn = get_conn()
+    conn.execute(
+        "UPDATE admins SET salt = ?, password_hash = ? WHERE username = ?",
+        (salt, pw_hash, admin["username"]),
+    )
+    conn.commit()
+    conn.close()
+    return True, "Şifre güncellendi."
 
 
 def get_students():
@@ -257,12 +325,12 @@ def delete_exam(exam_id):
 
 # ---------- results ----------
 
-def add_result(exam_id, student_name, per_subject, total_net, weighted_score):
+def add_result(exam_id, student_name, per_subject, total_net, weighted_score, answers_detail=None):
     conn = get_conn()
     c = conn.cursor()
     c.execute(
-        """INSERT INTO results (exam_id, student_name, per_subject, total_net, weighted_score, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO results (exam_id, student_name, per_subject, total_net, weighted_score, created_at, answers_detail)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             exam_id,
             student_name,
@@ -270,6 +338,7 @@ def add_result(exam_id, student_name, per_subject, total_net, weighted_score):
             total_net,
             weighted_score,
             datetime.now().isoformat(timespec="seconds"),
+            json.dumps(answers_detail, ensure_ascii=False) if answers_detail is not None else None,
         ),
     )
     conn.commit()
@@ -296,6 +365,8 @@ def get_results(student_name=None, exam_id=None):
     for r in rows:
         d = dict(r)
         d["per_subject"] = json.loads(d["per_subject"])
+        raw_detail = d.get("answers_detail")
+        d["answers_detail"] = json.loads(raw_detail) if raw_detail else None
         out.append(d)
     return out
 
