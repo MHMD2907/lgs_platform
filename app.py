@@ -104,17 +104,20 @@ def _compression_note(path):
         return ""
     gs_found = shutil.which("gs") is not None
     if not gs_found:
+        # ÖNEMLİ - ESKİ UYARI YANILTICIYDI: Burada "Ghostscript bulunamadı,
+        # GitHub'dan yeniden dağıtın" yazıyordu. Oysa (a) uygulama kendi
+        # bilgisayarınızda çalışırken `packages.txt` zaten hiç devreye girmez,
+        # Ghostscript'in orada olmaması normaldir; (b) daha da önemlisi,
+        # kitapçık artık tarayıcıya gömülmüyor, her sayfa sunucuda tek tek
+        # resme çevrilip gösteriliyor. Ölçüldü: 11,5 MB'lik sıkıştırılmamış
+        # dosyada da 4 MB'lik sıkıştırılmış dosyada da sayfa açma süresi aynı
+        # (~0,04 saniye). Yani küçültme yapılmaması bir SORUN DEĞİL.
         return (
-            f" (⚠️ PDF boyutu: {size_mb} MB — Ghostscript sunucuda bulunamadığı için "
-            f"küçültme YAPILAMADI; bu genelde `packages.txt` dosyası henüz devreye girmediğinde "
-            f"olur, uygulamayı GitHub'dan yeniden dağıtmayı deneyin.)"
+            f" (PDF boyutu: {size_mb} MB — küçültme yapılmadı, sorun değil: sayfalar "
+            f"tek tek resme çevrilerek gösterildiği için dosya boyutu açılma hızını "
+            f"etkilemiyor. Sadece 'kitapçığın tamamını indir' biraz uzun sürebilir.)"
         )
-    if size_mb > 8:
-        return (
-            f" (PDF boyutu: {size_mb} MB — küçültüldü ama yine de büyük kaldı, "
-            f"tablette yüklenmesi biraz zaman alabilir.)"
-        )
-    return f" (PDF boyutu: {size_mb} MB — sisteme küçültülmüş olarak kaydedildi.)"
+    return f" (PDF boyutu: {size_mb} MB — küçültülmüş olarak kaydedildi.)"
 
 
 def _pdf_cache_entry(path):
@@ -1264,25 +1267,37 @@ if st.session_state.is_admin:
                 sayisal_subjects = [(n, c) for n, c, _ in LGS_SUBJECTS["Sayısal"]]
                 _eba_flashes = []
 
-                # Kaynak sayfayi bir kez tarayip tum yillar icin kullaniyoruz
-                # (her yil icin tekrar tekrar indirmemek adina).
+                # ÖNEMLİ - EKRAN HATASI ("insertBefore ... NotFoundError"):
+                # Bu döngü her yıl için ayrı ayrı st.spinner(...) açıp kapatıyordu.
+                # Uzun bir aralıkta (2018-2025) bu, ekrandaki öğelerin sürekli
+                # yaratılıp yok edilmesi demek; Streamlit'in arayüzü bu hızlı
+                # değişime yetişemeyip tarayıcı hatası veriyordu. Artık döngü
+                # boyunca TEK BİR ilerleme çubuğu kullanılıyor, sadece yazısı
+                # güncelleniyor -- yeni öğe eklenip silinmiyor.
                 _scraped = {}
+                _durum = st.empty()
+                _ilerleme = st.progress(0.0, text="Hazırlanıyor...")
                 if years:
-                    with st.spinner("Kaynak sayfa taranıyor..."):
-                        _scraped = bot.scrape_source_page()
+                    _ilerleme.progress(0.0, text="Kaynak sayfa taranıyor...")
+                    _scraped = bot.scrape_source_page()
 
-                for yil in years:
+                for _yi, yil in enumerate(years, start=1):
+                    _oran = (_yi - 1) / max(len(years), 1)
                     exam_title = f"{yil} LGS (Resmi Arşiv)"
                     if db.exam_exists(exam_title, LGS_CATEGORY):
                         _eba_flashes.append(("success", f"↩️ {yil}: zaten sistemde, tekrar indirilmedi."))
+                        _ilerleme.progress(_yi / len(years), text=f"{yil}: zaten vardı, atlandı")
                         continue
-                    with st.spinner(f"{yil} indiriliyor..."):
-                        res = bot.fetch_lgs_year(yil, PDF_DIR, scraped=_scraped)
+                    _ilerleme.progress(_oran, text=f"{yil} indiriliyor... ({_yi}/{len(years)})")
+                    res = bot.fetch_lgs_year(yil, PDF_DIR, scraped=_scraped)
                     if not res["Sözel"] or not res["Sayısal"]:
+                        _eksik = [b for b in ("Sözel", "Sayısal") if not res[b]]
                         _eba_flashes.append((
                             "error",
-                            f"❌ {yil}: indirilemedi. " + " | ".join(res["hatalar"][:3]),
+                            f"❌ {yil}: {' ve '.join(_eksik)} kitapçığı indirilemedi "
+                            f"(bu yıl için geçerli bir adres bulunamadı). Diğer yıllar etkilenmedi.",
                         ))
+                        _ilerleme.progress(_yi / len(years), text=f"{yil}: bulunamadı")
                         continue
                     sozel_key, sozel_msg, sozel_idx = parsing.extract_answer_key(res["Sözel"], sozel_subjects)
                     sayisal_key, sayisal_msg, sayisal_idx = parsing.extract_answer_key(res["Sayısal"], sayisal_subjects)
@@ -1292,18 +1307,24 @@ if st.session_state.is_admin:
                             f"⚠️ {yil}: indirildi ama cevap anahtarı otomatik okunamadı "
                             f"({sozel_msg or sayisal_msg}). Manuel yüklemeyi deneyin.",
                         ))
+                        _ilerleme.progress(_yi / len(years), text=f"{yil}: cevap anahtarı okunamadı")
                         continue
                     safe_path = os.path.join(PDF_DIR, f"{yil}_LGS_guvenli.pdf")
-                    with st.spinner(f"{yil}: PDF hazırlanıyor ve küçültülüyor, bu birkaç saniye sürebilir..."):
-                        parsing.crop_and_merge([(res["Sözel"], sozel_idx), (res["Sayısal"], sayisal_idx)], safe_path)
-                        orig_path = os.path.join(PRIVATE_DIR,f"{yil}_LGS_orijinal.pdf")
-                        parsing.merge_full([res["Sözel"], res["Sayısal"]], orig_path)
+                    _ilerleme.progress(_oran, text=f"{yil}: PDF hazırlanıyor... ({_yi}/{len(years)})")
+                    parsing.crop_and_merge([(res["Sözel"], sozel_idx), (res["Sayısal"], sayisal_idx)], safe_path)
+                    orig_path = os.path.join(PRIVATE_DIR, f"{yil}_LGS_orijinal.pdf")
+                    parsing.merge_full([res["Sözel"], res["Sayısal"]], orig_path)
+                    _ilerleme.progress(_yi / len(years), text=f"{yil}: eklendi ({_yi}/{len(years)})")
                     db.add_exam(
                         exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE,
                         {"Sözel": sozel_key, "Sayısal": sayisal_key}, source="otomatik-eba",
                         pdf_path_original=orig_path,
                     )
                     _eba_flashes.append(("success", f"✅ {yil}: eklendi." + _compression_note(safe_path)))
+                # İlerleme çubuğunu ve durum alanını temizle, sonuçları
+                # yeniden çizilen sayfada tek seferde göster.
+                _ilerleme.empty()
+                _durum.empty()
                 if _eba_flashes:
                     st.session_state["_admin_flash"] = _eba_flashes
                 st.rerun()
