@@ -627,8 +627,23 @@ def render_student_login_form():
     # boş bırakıyoruz.
     _students = db.get_students()
     _default_user = _students[0]["username"] if len(_students) == 1 else ""
-    login_user = st.text_input("Kullanıcı Adı", value=_default_user, key="login_user")
-    login_pw = st.text_input("Şifre", type="password", key="login_pw")
+    # Yeni hesap oluşturulduysa: başarı mesajını BİR KEZ göster ve kullanıcı
+    # adını giriş kutusuna hazır getir. (Önceden mesaj ekranda takılı kalıyor,
+    # kayıt formu da dolu duruyordu; kullanıcı "kayıt oldu mu olmadı mı"
+    # anlayamıyordu.)
+    _kayit_mesaji = st.session_state.pop("_kayit_ok", None)
+    if _kayit_mesaji:
+        st.success(_kayit_mesaji, icon="✅")
+    # ÖNEMLİ: Streamlit, ekrana çizilmiş bir kutunun değerini sonradan
+    # DEĞİŞTİRMEYE izin vermez ("cannot be modified after the widget ... is
+    # instantiated" hatası). Kayıt olduktan sonra kullanıcı adını giriş
+    # kutusuna yazmak istediğimizde tam bu hata oluşuyor ve hesap oluşsa bile
+    # ekran donuyordu. Çözüm: kutunun ANAHTARINI değiştirmek -- anahtar
+    # değişince Streamlit bunu yepyeni bir kutu sayar ve 'value' geçerli olur.
+    _kutu_no = st.session_state.get("_login_kutu_no", 0)
+    _on_deger = st.session_state.get("_kayit_kullanici") or _default_user
+    login_user = st.text_input("Kullanıcı Adı", value=_on_deger, key=f"login_user_{_kutu_no}")
+    login_pw = st.text_input("Şifre", type="password", key=f"login_pw_{_kutu_no}")
     if st.button("Giriş Yap", key="student_login_btn", type="primary", use_container_width=True):
         student = db.verify_student(login_user, login_pw)
         if student:
@@ -639,10 +654,14 @@ def render_student_login_form():
             st.error("Kullanıcı adı veya şifre yanlış.")
 
     with st.expander("🆕 Hesabınız yok mu? Kayıt olun"):
-        reg_display = st.text_input("Adınız Soyadınız", key="reg_display")
-        reg_user = st.text_input("Kullanıcı Adı", key="reg_user", help="Boşluksuz, Türkçe karaktersiz olması önerilir.")
-        reg_pw = st.text_input("Şifre", type="password", key="reg_pw")
-        reg_pw2 = st.text_input("Şifre (tekrar)", type="password", key="reg_pw2")
+        # Kayıt kutuları da aynı "anahtarı değiştir" yöntemiyle temizleniyor:
+        # hesap oluşturulduktan sonra numara artıyor, kutular yepyeni ve boş
+        # olarak geliyor. (Doldurulmuş form ekranda takılı kalmıyor.)
+        reg_display = st.text_input("Adınız Soyadınız", key=f"reg_display_{_kutu_no}")
+        reg_user = st.text_input("Kullanıcı Adı", key=f"reg_user_{_kutu_no}",
+                                 help="Boşluksuz, Türkçe karaktersiz olması önerilir.")
+        reg_pw = st.text_input("Şifre", type="password", key=f"reg_pw_{_kutu_no}")
+        reg_pw2 = st.text_input("Şifre (tekrar)", type="password", key=f"reg_pw2_{_kutu_no}")
         if st.button("Hesap Oluştur", key="register_btn", use_container_width=True):
             if reg_pw != reg_pw2:
                 st.error("Girdiğiniz şifreler birbiriyle eşleşmiyor.")
@@ -651,7 +670,21 @@ def render_student_login_form():
             else:
                 ok, msg = db.create_student(reg_user, reg_display, reg_pw)
                 if ok:
-                    st.success(msg + " Şimdi yukarıdaki kutulardan giriş yapabilirsiniz.")
+                    # Kayıt formunu temizle, kullanıcı adını giriş kutusuna
+                    # taşı ve sayfayı yenile: böylece hem "oldu mu?" belirsizliği
+                    # kalmıyor hem de doldurulmuş form ekranda takılı kalmıyor.
+                    _yeni_kullanici = (reg_user or "").strip().lower().replace(" ", "_")
+                    # Giriş ve kayıt kutularını yeni kutular olarak yeniden yarat
+                    # (bkz. yukarıdaki "_kutu_no" açıklaması).
+                    st.session_state["_kayit_kullanici"] = _yeni_kullanici
+                    st.session_state["_login_kutu_no"] = (
+                        st.session_state.get("_login_kutu_no", 0) + 1
+                    )
+                    st.session_state["_kayit_ok"] = (
+                        f"Hesap oluşturuldu: **{_yeni_kullanici}**. "
+                        "Kullanıcı adı yukarıya yazıldı; şifrenizi girip **Giriş Yap** deyin."
+                    )
+                    st.rerun()
                 else:
                     st.error(msg)
 
