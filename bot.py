@@ -23,7 +23,18 @@ import os
 import re
 import requests
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LGS-Egitim-Platformu/1.0"
+# NOT: Bazi MEB okul siteleri (meb.k12.tr) alisilmadik tarayici kimligi
+# gonderen istekleri reddediyor. Bu yuzden sirandan bir Chrome kimligi
+# kullaniliyor.
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+_BASLIKLAR = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+}
 TIMEOUT = 20
 
 # Yil basina denenecek resmi EBA CDN kaliplari (yeni kaliplar buraya eklenebilir)
@@ -111,7 +122,7 @@ def scrape_source_page(page_url=LGS_SOURCE_PAGE):
     """Liste sayfasini tarayip {yil: {"Sözel": url, "Sayısal": url}} dondurur.
     Sayfaya ulasilamazsa bos sozluk doner (asla hata firlatmaz)."""
     try:
-        resp = requests.get(page_url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+        resp = requests.get(page_url, headers=_BASLIKLAR, timeout=TIMEOUT)
         if resp.status_code != 200:
             return {}
         html = resp.text
@@ -155,23 +166,40 @@ IOKBS_YAPISI = {
 }
 
 
-def scrape_bursluluk(page_url=BURSLULUK_SOURCE_PAGE):
+def scrape_bursluluk(page_url=BURSLULUK_SOURCE_PAGE, ayrinti=None):
     """Bursluluk sayfasindaki baglantilari {(yil, sinif): url} olarak dondurur.
 
     YONTEM: Sayfa "2016 yili ... kitapciklari", ardindan "5. Sinif icin
     Tiklayiniz", "6. Sinif icin Tiklayiniz" ... seklinde ilerliyor. Yani bir
     baglantinin HANGI YILA ait oldugu, kendisinden ONCE gelen en son yil
-    basligindan anlasiliyor. Bu yuzden sayfa bastan sona SIRAYLA taraniyor:
-    yil basliklari ve baglantilar hangi sirayla geliyorsa o sirayla islenir.
+    basligindan anlasiliyor. Bu yuzden sayfa bastan sona SIRAYLA taraniyor.
+
+    ayrinti: (varsa) icine hata/teshis bilgisi yazilan bir liste. Bos sonuc
+    donunce sebebinin ne oldugunu ekranda gosterebilmek icin kullanilir --
+    "ulasilamadi" demek yerine gercek sebebi soylemek gerekiyor.
 
     Hata olursa bos sozluk doner (asla istisna firlatmaz)."""
+    def _not(m):
+        if ayrinti is not None:
+            ayrinti.append(m)
+
     try:
-        resp = requests.get(page_url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+        resp = requests.get(page_url, headers=_BASLIKLAR, timeout=TIMEOUT,
+                            allow_redirects=True)
         if resp.status_code != 200:
+            _not(f"Sunucu HTTP {resp.status_code} yanıtı verdi ({page_url}).")
             return {}
         resp.encoding = resp.apparent_encoding or resp.encoding
         html = resp.text
-    except requests.exceptions.RequestException:
+        _not(f"Sayfa alındı ({len(html)} karakter).")
+    except requests.exceptions.SSLError as e:
+        _not(f"Güvenli bağlantı (SSL) kurulamadı: {e}")
+        return {}
+    except requests.exceptions.Timeout:
+        _not(f"Sunucu {TIMEOUT} saniyede yanıt vermedi.")
+        return {}
+    except requests.exceptions.RequestException as e:
+        _not(f"Bağlantı hatası: {e}")
         return {}
 
     taban = re.match(r"^(https?://[^/]+)", page_url)
@@ -209,7 +237,23 @@ def scrape_bursluluk(page_url=BURSLULUK_SOURCE_PAGE):
             continue
         sinif = int(sm.group(1))
         bulunan.setdefault((aktif_yil, sinif), _tam_url(m.group("href")))
+    if not bulunan:
+        _toplam_link = len(re.findall(r"<a[^>]+href=", html, re.IGNORECASE))
+        _yil_sayisi = len(re.findall(r"20[0-9]{2}\s*y[ıi]l[ıi]", html, re.IGNORECASE))
+        _not(
+            f"Sayfada {_toplam_link} bağlantı ve {_yil_sayisi} yıl başlığı görüldü, "
+            "ama hiçbiri 'X. Sınıf' kalıbıyla eşleşmedi. Sayfanın yapısı değişmiş olabilir."
+        )
     return bulunan
+
+
+def sayfa_ham_getir(page_url=BURSLULUK_SOURCE_PAGE, limit=1500):
+    """Teshis icin: sayfanin ham metninin bir kismini dondurur."""
+    try:
+        resp = requests.get(page_url, headers=_BASLIKLAR, timeout=TIMEOUT)
+        return f"HTTP {resp.status_code}\n" + (resp.text or "")[:limit]
+    except Exception as e:
+        return f"HATA: {e}"
 
 
 def bursluluk_indir(url, dest_path):
@@ -219,7 +263,7 @@ def bursluluk_indir(url, dest_path):
 
 def _download(url, dest_path):
     try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT, stream=True)
+        resp = requests.get(url, headers=_BASLIKLAR, timeout=TIMEOUT, stream=True)
     except requests.exceptions.RequestException as e:
         return False, f"Bağlantı hatası: {e}"
     if resp.status_code != 200:

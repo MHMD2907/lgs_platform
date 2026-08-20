@@ -12,6 +12,7 @@ uzerinden okunup sunucu tarafinda (bu bilgisayarda) karsilastirilir.
 
 import sqlite3
 import json
+import threading
 import re
 import os
 import hashlib
@@ -68,11 +69,21 @@ class _PgCursor:
     """psycopg imlecini, kodun geri kalanının beklediği sqlite3 arayüzüne
     benzetir: '?' yer tutucularını '%s' yapar ve satırları sözlük döndürür."""
 
-    def __init__(self, cur):
-        self._cur = cur
+    def __init__(self, owner):
+        self._owner = owner
+        self._cur = owner._raw().cursor()
 
     def execute(self, sql, params=()):
-        self._cur.execute(_to_pg(sql), tuple(params))
+        try:
+            self._cur.execute(_to_pg(sql), tuple(params))
+        except Exception as e:
+            # Uzun süre kullanılmayan bağlantıyı sunucu kapatmış olabilir.
+            # Böyle bir durumda sessizce yeni bağlantı kurup bir kez daha dene.
+            if not _baglanti_kopmus(e):
+                raise
+            self._owner._reset()
+            self._cur = self._owner._raw().cursor()
+            self._cur.execute(_to_pg(sql), tuple(params))
         return self
 
     def fetchone(self):
@@ -95,21 +106,72 @@ class _PgCursor:
         self._cur.close()
 
 
+def _baglanti_kopmus(e):
+    """Hata, bağlantının kopmasından mı kaynaklanıyor?"""
+    ad = type(e).__name__
+    return ad in ("OperationalError", "InterfaceError", "AdminShutdown",
+                  "ConnectionTimeout", "ConnectionException")
+
+
+# ÖNEMLİ - HIZ: Uygulamanın her ekran yenilemesinde veritabanına ONLARCA kez
+# başvuruluyor (kategoriler, denemeler, sonuçlar, sayaçlar...). Kendi
+# bilgisayarındaki dosyaya bağlanmak bedavaydı; ama Frankfurt'taki sunucuya
+# HER SEFERİNDE yeni bir bağlantı açmak, her biri için ayrı ayrı el sıkışma
+# (TCP + TLS) demek ve tek bir tuşa basmayı saniyelerce uzatıyordu.
+# Çözüm: bağlantı bir kez açılıp saklanıyor, sonraki tüm sorgular AYNI
+# bağlantıyı kullanıyor. Her iş parçacığı (kullanıcı oturumu) için ayrı bir
+# bağlantı tutulur; psycopg bağlantıları aynı anda paylaşılmaya uygun değildir.
+_yerel = threading.local()
+
+
 class _PgConn:
-    def __init__(self, conn):
-        self._conn = conn
+    """Havuzlanmış PostgreSQL bağlantısı. close() çağrıldığında bağlantı
+    GERÇEKTEN kapatılmaz; sadece açık kalmış okuma işlemi geri alınıp
+    bağlantı bir sonraki sorgu için hazır bırakılır."""
+
+    def _raw(self):
+        conn = getattr(_yerel, "conn", None)
+        if conn is not None:
+            try:
+                if conn.closed:
+                    conn = None
+            except Exception:
+                conn = None
+        if conn is None:
+            conn = _yeni_pg_baglantisi()
+            _yerel.conn = conn
+        return conn
+
+    def _reset(self):
+        eski = getattr(_yerel, "conn", None)
+        _yerel.conn = None
+        if eski is not None:
+            try:
+                eski.close()
+            except Exception:
+                pass
 
     def cursor(self):
-        return _PgCursor(self._conn.cursor())
+        return _PgCursor(self)
 
     def execute(self, sql, params=()):
         return self.cursor().execute(sql, params)
 
     def commit(self):
-        self._conn.commit()
+        try:
+            self._raw().commit()
+        except Exception as e:
+            if not _baglanti_kopmus(e):
+                raise
+            self._reset()
 
     def close(self):
-        self._conn.close()
+        # Bağlantıyı kapatmıyoruz; sadece açıkta kalan okuma işlemini
+        # sonlandırıyoruz ki sunucuda "boşta işlem" birikmesin.
+        try:
+            self._raw().rollback()
+        except Exception:
+            self._reset()
 
 
 def _to_pg(sql):
@@ -133,39 +195,40 @@ def _to_pg(sql):
     return sql
 
 
-def get_conn():
+def _yeni_pg_baglantisi():
     url = _db_url()
-    if url:
-        try:
-            import psycopg
-            from psycopg.rows import dict_row
-        except ImportError as e:
-            raise RuntimeError(
-                "Kalıcı veritabanı için gerekli 'psycopg' kütüphanesi kurulu değil. "
-                "requirements.txt dosyasını da GitHub'a yükleyip uygulamayı yeniden "
-                "başlatın."
-            ) from e
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+    except ImportError as e:
+        raise RuntimeError(
+            "Kalıcı veritabanı için gerekli 'psycopg' kütüphanesi kurulu değil. "
+            "requirements.txt dosyasını da GitHub'a yükleyip uygulamayı yeniden "
+            "başlatın."
+        ) from e
+    # ONEMLI - prepare_threshold=None: bkz. asagidaki aciklama.
+    try:
+        return psycopg.connect(
+            url, row_factory=dict_row, autocommit=False,
+            prepare_threshold=None, connect_timeout=15,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            "Kalıcı veritabanına bağlanılamadı. Streamlit'in Secrets bölümündeki "
+            f"DB_URL adresini kontrol edin (şifre kısmı doğru mu?). Hata: {e}"
+        ) from e
 
-        # ONEMLI - prepare_threshold=None:
-        # Supabase'e baglanti "pooler" (havuzlayici) uzerinden yapilir. Havuzun
-        # "transaction" kipinde her sorgu baska bir baglantiya dusebilir; psycopg
-        # ise birkac tekrardan sonra sorgulari sunucuda "hazirlanmis ifade" olarak
-        # saklamaya calisir ve o ifade digerbaglantida bulunamayinca
-        # "prepared statement does not exist" hatasi verir. Bu ayar hazirlanmis
-        # ifadeleri tamamen kapatir; boylece hem "session" hem "transaction"
-        # havuzuyla sorunsuz calisir.
-        try:
-            return _PgConn(
-                psycopg.connect(
-                    url, row_factory=dict_row, autocommit=False,
-                    prepare_threshold=None, connect_timeout=15,
-                )
-            )
-        except Exception as e:
-            raise RuntimeError(
-                "Kalıcı veritabanına bağlanılamadı. Streamlit'in Secrets bölümündeki "
-                f"DB_URL adresini kontrol edin (şifre kısmı doğru mu?). Hata: {e}"
-            ) from e
+
+def get_conn():
+    """Veritabanı bağlantısı döndürür.
+
+    DB_URL varsa PostgreSQL (Supabase) -- bağlantı tekrar kullanılır, her
+    çağrıda yeniden kurulmaz (bkz. _PgConn üstündeki HIZ notu).
+    DB_URL yoksa bilgisayardaki SQLite dosyası."""
+    if _db_url():
+        conn = _PgConn()
+        conn._raw()  # bağlantıyı şimdi kur ki hata varsa hemen görülsün
+        return conn
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")

@@ -493,7 +493,10 @@ def inject_css():
         footer {visibility: hidden;}
         header[data-testid="stHeader"] {background: transparent !important;}
         div[data-testid="stDecoration"] {display: none !important;}
-        div[data-testid="stStatusWidget"] {display: none !important;}
+        /* NOT: Burada eskiden stStatusWidget de gizleniyordu. Ama sağ üstte
+           "çalışıyor" anlamına gelen KOŞAN ADAM animasyonu tam olarak o
+           bileşen; gizlenince kullanıcı bir işlem sürerken hiçbir belirti
+           göremiyordu. Geri açıldı. */
         /* Gereksiz düğmeler: "Deploy", üç nokta menüsü ve Streamlit Cloud'un
            "Manage app" / hesap rozeti (bunlar Streamlit hesabına götürüyordu,
            öğrencinin görmesine gerek yok). */
@@ -1741,17 +1744,29 @@ if st.session_state.is_admin:
             )
             _bl_key = "_bursluluk_liste"
             if st.button("🔎 Sayfayı Tara ve Kitapçıkları Bul", type="primary"):
+                _tani = []
                 with st.spinner("MEB sayfası taranıyor..."):
-                    _bulunan = bot.scrape_bursluluk()
+                    _bulunan = bot.scrape_bursluluk(ayrinti=_tani)
                 st.session_state[_bl_key] = {f"{y}|{s}": u for (y, s), u in _bulunan.items()}
+                st.session_state["_bursluluk_tani"] = _tani
                 st.rerun()
 
             _liste = st.session_state.get(_bl_key)
             if _liste is not None and not _liste:
                 st.error(
-                    "Sayfaya ulaşılamadı ya da hiç kitapçık bağlantısı bulunamadı. "
-                    "İnternet bağlantınızı kontrol edip tekrar deneyin."
+                    "Kitapçık bağlantısı bulunamadı. Aşağıdaki teşhis bilgisi sebebini gösteriyor:"
                 )
+                for _t in st.session_state.get("_bursluluk_tani", []):
+                    st.code(_t)
+                st.caption(
+                    "Bu sayfa MEB'e ait bir okul sitesinde barındırılıyor ve zaman zaman "
+                    "erişime kapanabiliyor. Bu arada kitapçıkları elle de ekleyebilirsiniz: "
+                    "**URL'den PDF İndir** bölümüne bağlantıyı yapıştırın, ardından "
+                    "**Diğer Kategori / Soru Bankası Ekle (Manuel)** ile işleyin."
+                )
+                with st.expander("🔧 Ayrıntılı teşhis (sayfanın ham içeriği)"):
+                    if st.button("Sayfayı ham haliyle getir", key="bl_ham"):
+                        st.code(bot.sayfa_ham_getir()[:1500])
             elif _liste:
                 _cozulmus = sorted(
                     (int(k.split("|")[0]), int(k.split("|")[1])) for k in _liste
