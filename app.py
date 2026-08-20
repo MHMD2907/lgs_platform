@@ -11,6 +11,7 @@ Ayrıntılı kurulum ve kullanım için README.md dosyasına bakın.
 """
 
 import io
+import json
 import os
 import re
 import shutil
@@ -91,6 +92,123 @@ def slugify(title, fallback="test"):
     donusturulur). Boylece dosya adresleri tarayicida sorunsuz calisir."""
     s = re.sub(r"[^A-Za-z0-9_]+", "_", (title or "").translate(TR_MAP)).strip("_")
     return s or fallback
+
+
+def _istatistik_al():
+    """Ana sayfa sayaclarini getirir.
+
+    ONEMLI - KISMI GUNCELLEME KORUMASI: Bu ozellik db.py'deki yeni bir
+    fonksiyona dayaniyor. Kullanici GitHub'a sadece app.py'yi yukleyip
+    db.py'yi eski birakirsa, uygulama "AttributeError" ile TAMAMEN cokuyordu
+    (Streamlit Cloud'da tam olarak bu yasandi). Artik boyle bir durumda
+    uygulama calismaya devam ediyor, sadece sayaclar gosterilmiyor ve
+    ekranda hangi dosyanin eksik oldugu net sekilde yaziyor."""
+    try:
+        return db.genel_istatistikler(), None
+    except AttributeError:
+        return None, (
+            "⚠️ Sayaçlar gösterilemiyor: **db.py dosyası eski sürümde.** "
+            "Bu özellik `db.py` içindeki yeni bir fonksiyona ihtiyaç duyuyor. "
+            "GitHub'a `app.py` ile birlikte **`db.py`, `bot.py`, `config.py`, "
+            "`scoring.py` ve `soru_bankasi.py`** dosyalarını da yükleyin."
+        )
+    except Exception as e:
+        return None, f"Sayaçlar hesaplanamadı: {e}"
+
+
+def _tarih_bicimle(ham):
+    """'2026-08-20T07:11:11' -> '20.08.2026  07:11' (okunakli hale getirir)."""
+    try:
+        return datetime.fromisoformat(str(ham)).strftime("%d.%m.%Y  %H:%M")
+    except (TypeError, ValueError):
+        return str(ham or "")
+
+
+def _detay_icerigi(r, vurgu_ders=None):
+    """Bir sınav sonucunun ayrıntılı dökümünü çizer."""
+    st.markdown(
+        f"**{r['exam_title']}**  ·  *{r['category']}*  \n"
+        f"🗓️ **{_tarih_bicimle(r.get('created_at'))}**"
+        + ("  ·  🎯 İkinci şans turu" if r.get("mode") == "yanlis" else "")
+    )
+    ps = r["per_subject"]
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("✅ Doğru", sum(v["dogru"] for v in ps.values()))
+    a2.metric("❌ Yanlış", sum(v["yanlis"] for v in ps.values()))
+    a3.metric("⬜ Boş", sum(v["bos"] for v in ps.values()))
+    a4.metric("📊 Toplam Net", r["total_net"])
+    if r.get("weighted_score") is not None:
+        st.caption(f"Tahmini ağırlıklı puan göstergesi: {r['weighted_score']}")
+
+    detay = r.get("answers_detail")
+    if not detay:
+        st.info("Bu sonuç için soru bazlı döküm kaydedilmemiş.")
+        return
+    dersler = [(b, d) for b, ds in detay.items() for d in ds]
+    # Tıklanan ders varsa onu başa al
+    if vurgu_ders:
+        dersler.sort(key=lambda x: x[1] != vurgu_ders)
+    sekmeler = st.tabs([d for _, d in dersler])
+    for (bolum, ders), sek in zip(dersler, sekmeler):
+        with sek:
+            satirlar = detay[bolum][ders]
+            yanlis = [x for x in satirlar if x["durum"] != "dogru"]
+            if not yanlis:
+                st.success(f"{ders}: tüm sorular doğru! 🎉")
+                continue
+            dfd = pd.DataFrame(yanlis).rename(columns={
+                "soru": "Soru No", "verilen": "Senin Cevabın",
+                "dogru_cevap": "Doğru Cevap", "durum": "Durum",
+            })
+            dfd["Durum"] = dfd["Durum"].map({"yanlis": "❌ Yanlış", "bos": "⬜ Boş"})
+            st.dataframe(dfd, use_container_width=True, hide_index=True)
+
+
+def _detay_penceresi(r, vurgu_ders=None):
+    """Ayrintili dokumu PIN korumali bir pencerede acar.
+
+    PIN, yoneticinin 'Hesap Ayarlari' bolumunde belirledigi koddur. Amac:
+    ogrencinin dogru cevaplari sinav sirasinda ya da izinsiz gormesini
+    engellemek -- dokum ancak veli PIN'i girdiginde acilir.
+
+    Streamlit'in modal pencere ozelligi (st.dialog) eski surumlerde
+    bulunmadigi icin, yoksa ayni icerik normal bir kutuda gosterilir."""
+    pin = db.get_setting("rapor_pin", "") or ""
+
+    def _govde():
+        if pin:
+            girilen = st.text_input(
+                "PIN kodu", type="password", key=f"_pin_giris_{r['id']}",
+                help="Bu kodu yönetici belirler (Admin Paneli → Hesap Ayarları).",
+            )
+            c1, c2 = st.columns(2)
+            if c1.button("Aç", key=f"_pin_ac_{r['id']}", type="primary", use_container_width=True):
+                if girilen == pin:
+                    st.session_state[f"_pin_ok_{r['id']}"] = True
+                    st.rerun()
+                else:
+                    st.error("PIN kodu yanlış.")
+            if c2.button("Kapat", key=f"_pin_kapat_{r['id']}", use_container_width=True):
+                st.session_state["_detay_acik"] = False
+                st.rerun()
+            if not st.session_state.get(f"_pin_ok_{r['id']}"):
+                return
+        _detay_icerigi(r, vurgu_ders)
+        if st.button("Kapat", key=f"_detay_kapat_{r['id']}", use_container_width=True):
+            st.session_state["_detay_acik"] = False
+            st.session_state.pop(f"_pin_ok_{r['id']}", None)
+            st.rerun()
+
+    dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+    if dialog:
+        @dialog("🔐 Sınav Detayı", width="large")
+        def _pencere():
+            _govde()
+        _pencere()
+    else:
+        with st.container(border=True):
+            st.markdown("#### 🔐 Sınav Detayı")
+            _govde()
 
 
 def _compression_note(path):
@@ -545,7 +663,11 @@ if not st.session_state.student_name and not st.session_state.is_admin:
         unsafe_allow_html=True,
     )
     # ---- Sayaçlar: sistemde ne var, ne kadarı çözülmüş ----
-    _ist = db.genel_istatistikler()
+    _ist, _ist_hata = _istatistik_al()
+    if _ist_hata:
+        st.warning(_ist_hata)
+        _ist = {"toplam_deneme": 0, "toplam_soru": 0, "toplam_sonuc": 0,
+                "ogrenci_sayisi": 0, "kategoriler": {}}
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("📚 Toplam Deneme/Test", _ist["toplam_deneme"])
     m2.metric("❓ Toplam Soru", _ist["toplam_soru"])
@@ -644,7 +766,11 @@ with tabs[0]:
     st.markdown("### 📱 Sınav Çöz")
 
     # ---- Sayaçlar: sistemde ne var, öğrenci ne kadarını çözmüş ----
-    _ist = db.genel_istatistikler()
+    _ist, _ist_hata = _istatistik_al()
+    if _ist_hata:
+        st.warning(_ist_hata)
+        _ist = {"toplam_deneme": 0, "toplam_soru": 0, "toplam_sonuc": 0,
+                "ogrenci_sayisi": 0, "kategoriler": {}}
     _benim = (
         len(db.get_results(student_name=st.session_state.student_name))
         if st.session_state.student_name else 0
@@ -716,6 +842,36 @@ with tabs[0]:
         answer_key = exam["answer_key"]
         student_name = st.session_state.student_name
 
+        def _soru_numaralari(meta, k_list):
+            """Bir dersin soru numaralari: soru bankasindan gelen testlerde
+            kitaptaki gercek numaralar ('numbers'), diger her yerde 1..N."""
+            return (meta or {}).get("numbers") or list(range(1, len(k_list) + 1))
+
+        def _kisitli_yapi_ve_anahtar(secili):
+            """'Sadece yanlislari coz' modu icin, verilen soru numaralarina
+            gore kucultulmus bir yapi ve cevap anahtari uretir.
+
+            secili: {bolum: {ders: [soru_no, ...]}}"""
+            y, a = {}, {}
+            for bolum, dersler in secili.items():
+                for ders, numaralar in dersler.items():
+                    if not numaralar:
+                        continue
+                    meta = structure.get(bolum, {}).get(ders, {})
+                    k_list = answer_key.get(bolum, {}).get(ders, [])
+                    tum = _soru_numaralari(meta, k_list)
+                    eslesme = {n: k_list[i] for i, n in enumerate(tum) if i < len(k_list)}
+                    kalanlar = [n for n in numaralar if n in eslesme]
+                    if not kalanlar:
+                        continue
+                    y.setdefault(bolum, {})[ders] = {
+                        "count": len(kalanlar),
+                        "coef": meta.get("coef", 1),
+                        "numbers": kalanlar,
+                    }
+                    a.setdefault(bolum, {})[ders] = [eslesme[n] for n in kalanlar]
+            return y, a
+
         # Bir öğrenci daha önce (belki de başka bir oturumda / cihazda) bu
         # denemeyi çözmeye başlamış ya da bitirmişse, deneme numarasını
         # veritabanından öğreniyoruz -- böylece sayfa yeniden açıldığında
@@ -725,6 +881,18 @@ with tabs[0]:
                 selected_exam_id, student_name
             )
         attempt_no = st.session_state.attempt[selected_exam_id]
+
+        # "İkinci şans" modu: bu deneme numarasında SADECE önceki yanlış/boş
+        # sorular soruluyorsa, hangi sorular olduğu veritabanında saklanır.
+        # (Oturum belleğinde tutulsaydı sayfa kapanınca kaybolur ve öğrenci
+        #  yarım kalan ikinci şansına geri dönemezdi.)
+        _wrong_key = f"wrongmode:{selected_exam_id}:{student_name}:{attempt_no}"
+        _wrong_raw = db.get_setting(_wrong_key) if student_name else None
+        _wrong_sel = json.loads(_wrong_raw) if _wrong_raw else None
+        if _wrong_sel:
+            aktif_yapi, aktif_anahtar = _kisitli_yapi_ve_anahtar(_wrong_sel)
+        else:
+            aktif_yapi, aktif_anahtar = structure, answer_key
 
         existing_result = db.get_result_for_attempt(selected_exam_id, student_name, attempt_no)
 
@@ -750,7 +918,11 @@ with tabs[0]:
         with col_form:
             if existing_result:
                 # ---- Bu deneme numarası için sınav zaten bitirilmiş: sonucu göster ----
-                st.success("✅ Bu denemeyi zaten çözdünüz. Sonuçlarınız:")
+                if existing_result.get("mode") == "yanlis":
+                    st.success("🎯 **İkinci şans** turunu tamamladınız. Sonuçlarınız:")
+                else:
+                    st.success("✅ Bu denemeyi zaten çözdünüz. Sonuçlarınız:")
+                st.caption(f"🗓️ Çözüm tarihi: **{_tarih_bicimle(existing_result.get('created_at'))}**")
                 per_subject = existing_result["per_subject"]
                 total_net = existing_result["total_net"]
                 weighted_score = existing_result["weighted_score"]
@@ -767,8 +939,44 @@ with tabs[0]:
                         "puanı değildir."
                     )
                 st.divider()
+
+                # ---- İKİNCİ ŞANS: sadece yanlış/boş bırakılan soruları çöz ----
+                _detay = existing_result.get("answers_detail")
+                _yanlislar = {}
+                if _detay:
+                    for _b, _dersler in _detay.items():
+                        for _d, _satirlar in _dersler.items():
+                            _nums = [x["soru"] for x in _satirlar if x.get("durum") != "dogru"]
+                            if _nums:
+                                _yanlislar.setdefault(_b, {})[_d] = _nums
+                _yanlis_adet = sum(len(v) for d in _yanlislar.values() for v in d.values())
+
+                if _yanlis_adet and student_name:
+                    st.markdown(f"**🎯 İkinci şans:** {_yanlis_adet} soruyu yanlış yaptın veya boş bıraktın.")
+                    st.caption(
+                        "Bu düğme sadece o soruları yeniden sorar; doğru yaptıkların "
+                        "tekrar karşına çıkmaz. Önceki sonucun silinmez, ayrıca saklanır."
+                    )
+                    if st.button(
+                        f"🎯 Sadece Yanlışlarımı Çöz ({_yanlis_adet} soru)",
+                        key=f"wrongretry_{selected_exam_id}_{attempt_no}",
+                        use_container_width=True,
+                        type="primary",
+                    ):
+                        _yeni = attempt_no + 1
+                        db.set_setting(
+                            f"wrongmode:{selected_exam_id}:{student_name}:{_yeni}",
+                            json.dumps(_yanlislar, ensure_ascii=False),
+                        )
+                        st.session_state.attempt[selected_exam_id] = _yeni
+                        st.rerun()
+                elif _yanlis_adet and not student_name:
+                    st.info("İkinci şans için giriş yapmanız gerekiyor.")
+                elif _detay:
+                    st.success("🎉 Bu denemede hiç yanlışın yok, ikinci şansa gerek kalmadı!")
+
                 if st.button(
-                    "🔄 Yeniden Çöz (yeni bir deneme başlat)",
+                    "🔄 Yeniden Çöz (sınavın tamamını baştan)",
                     key=f"retry_{selected_exam_id}_{attempt_no}",
                     use_container_width=True,
                 ):
@@ -777,6 +985,15 @@ with tabs[0]:
             else:
                 # ---- Bu deneme numarası henüz bitirilmemiş: formu göster ----
                 st.subheader("📝 Optik Form")
+                if _wrong_sel:
+                    _ikinci_n = sum(
+                        m["count"] for b in aktif_yapi.values() for m in b.values()
+                    )
+                    st.info(
+                        f"🎯 **İkinci şans turu** — sadece daha önce yanlış yaptığın veya boş "
+                        f"bıraktığın **{_ikinci_n} soru** soruluyor. Soru numaraları "
+                        f"kitapçıktakiyle aynı."
+                    )
                 if student_name:
                     st.caption(
                         "İşaretlediğiniz cevaplar otomatik kaydedilir; sayfa kapanırsa veya "
@@ -801,12 +1018,15 @@ with tabs[0]:
                     or {}
                 )
 
+                # "İkinci şans" modunda yapı, sadece yanlış yapılan soruları
+                # içeren küçültülmüş sürümdür (aktif_yapi); normal turda ise
+                # denemenin kendi yapısıdır.
                 all_subjects = [
                     (section, subject)
-                    for section, subjects in structure.items()
+                    for section, subjects in aktif_yapi.items()
                     for subject in subjects
                 ]
-                user_answers = {section: {} for section in structure}
+                user_answers = {section: {} for section in aktif_yapi}
                 options = ["A", "B", "C", "D", "Boş"]
 
                 # PDF görüntüleyici ile aynı yükseklikte, kaydırılabilir bir
@@ -817,7 +1037,7 @@ with tabs[0]:
                     subject_tabs = st.tabs([s for _, s in all_subjects])
                     for (section, subject), stab in zip(all_subjects, subject_tabs):
                         with stab:
-                            _meta = structure[section][subject]
+                            _meta = aktif_yapi[section][subject]
                             count = _meta["count"]
                             # ÖNEMLİ - OPTİK FORM PDF İLE AYNI NUMARALARI
                             # GÖSTERİR: Soru bankasından alınan bazı testlerin
@@ -857,7 +1077,7 @@ with tabs[0]:
 
                 # ---- İlerleme sayacı: kaç soru işaretlendi / toplam kaç soru ----
                 _total_q = sum(
-                    structure[sec][sub]["count"] for sec, sub in all_subjects
+                    aktif_yapi[sec][sub]["count"] for sec, sub in all_subjects
                 )
                 _done_q = sum(
                     1
@@ -888,12 +1108,15 @@ with tabs[0]:
                     )
                 elif submitted:
                     per_subject, total_net, weighted_score = scoring.score_exam(
-                        user_answers, answer_key, structure
+                        user_answers, aktif_anahtar, aktif_yapi
                     )
-                    answers_detail = scoring.build_answer_detail(user_answers, answer_key, structure)
+                    answers_detail = scoring.build_answer_detail(
+                        user_answers, aktif_anahtar, aktif_yapi
+                    )
                     db.add_result(
                         selected_exam_id, student_name, per_subject, total_net,
                         weighted_score, answers_detail=answers_detail, attempt_no=attempt_no,
+                        mode="yanlis" if _wrong_sel else "tam",
                     )
                     db.clear_progress(selected_exam_id, student_name, attempt_no)
                     st.session_state.pop(buf_key, None)
@@ -915,64 +1138,108 @@ with tabs[1]:
             df = pd.DataFrame(
                 [
                     {
-                        "Tarih": r["created_at"],
+                        "🗓️ Tarih": _tarih_bicimle(r["created_at"]),
                         "Sınav": r["exam_title"],
                         "Kategori": r["category"],
+                        "Tür": "🎯 İkinci şans" if r.get("mode") == "yanlis" else "📝 Tam sınav",
                         "Toplam Net": r["total_net"],
                         "Ağırlıklı Puan": r["weighted_score"],
                     }
                     for r in results
                 ]
             )
-            st.dataframe(df, use_container_width=True, hide_index=True)
-            chart_df = df[["Tarih", "Toplam Net"]].set_index("Tarih").sort_index()
-            st.line_chart(chart_df)
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "🗓️ Tarih": st.column_config.TextColumn("🗓️ Sınav Tarihi", width="medium"),
+                },
+            )
+            _tam = [r for r in results if r.get("mode") != "yanlis"]
+            if len(_tam) >= 2:
+                _cd = pd.DataFrame(
+                    [{"Tarih": _tarih_bicimle(r["created_at"]), "Toplam Net": r["total_net"]}
+                     for r in _tam]
+                ).set_index("Tarih").sort_index()
+                st.line_chart(_cd)
 
-            # ---- Her sınavın üstüne basınca açılan detay penceresi ----
-            # (Aynı dökum admin tarafındaki "Öğrenci Raporları" bölümünde de var;
-            #  öğrenci kendi sayfasında SADECE görebilir, silemez.)
+            # ---- İLK ÇÖZÜM vs SONRAKİLER karşılaştırması ----
             st.divider()
-            st.markdown("### 📋 Sınav Detayları")
-            st.caption("Bir sınavın üzerine dokunarak kaç doğru, kaç yanlış, kaç boş yaptığını görebilirsin.")
+            st.markdown("### 📈 İlk Çözüm / Sonraki Çözümler")
+            _gruplar = {}
             for r in results:
-                _title = (
-                    f"📝 {r['exam_title']}  ·  {r['created_at']}  ·  Net: {r['total_net']}"
+                if r.get("mode") == "yanlis":
+                    continue  # ikinci şans turları net karşılaştırmasına girmez
+                _gruplar.setdefault(r["exam_id"], []).append(r)
+            _satirlar = []
+            for _eid, _rs in _gruplar.items():
+                _rs = sorted(_rs, key=lambda x: x["created_at"])
+                _ilk, _son = _rs[0], _rs[-1]
+                _satirlar.append({
+                    "Sınav": _ilk["exam_title"],
+                    "Çözüm Sayısı": len(_rs),
+                    "🗓️ İlk Çözüm": _tarih_bicimle(_ilk["created_at"]),
+                    "İlk Net": _ilk["total_net"],
+                    "🗓️ Son Çözüm": _tarih_bicimle(_son["created_at"]) if len(_rs) > 1 else "—",
+                    "Son Net": _son["total_net"] if len(_rs) > 1 else "—",
+                    "Değişim": (
+                        round(_son["total_net"] - _ilk["total_net"], 2) if len(_rs) > 1 else "—"
+                    ),
+                })
+            if _satirlar:
+                st.dataframe(pd.DataFrame(_satirlar), use_container_width=True, hide_index=True)
+                _gelisen = [s for s in _satirlar if isinstance(s["Değişim"], float) and s["Değişim"] > 0]
+                if _gelisen:
+                    st.success(
+                        f"👏 {len(_gelisen)} denemede netin arttı! "
+                        f"En çok artış: **+{max(s['Değişim'] for s in _gelisen)} net**"
+                    )
+            else:
+                st.caption("Karşılaştırma için henüz yeterli çözüm yok.")
+
+            # ---- Sınav detayları: ders kutucuğuna basınca PIN'li pencere ----
+            st.divider()
+            st.markdown("### 📋 Sınav Sonuçları")
+            st.caption(
+                "Her sınavın ders kutucuğuna dokunarak ayrıntılı dökümü açabilirsin. "
+                "Ayrıntılı döküm **PIN kodu** ile korunuyor."
+            )
+            for _ri, r in enumerate(results):
+                _tur = "🎯 İkinci şans" if r.get("mode") == "yanlis" else "📝 Tam sınav"
+                with st.container(border=True):
+                    _h1, _h2 = st.columns([3, 2])
+                    _h1.markdown(f"**{r['exam_title']}**  \n*{r['category']} · {_tur}*")
+                    _h2.markdown(
+                        f"<div style='text-align:right;'>"
+                        f"<span style='background:#1E3A8A;color:#fff;padding:5px 12px;"
+                        f"border-radius:20px;font-weight:600;font-size:0.95rem;'>"
+                        f"🗓️ {_tarih_bicimle(r['created_at'])}</span><br>"
+                        f"<span style='font-size:1.35rem;font-weight:700;color:#1E3A8A;'>"
+                        f"Net: {r['total_net']}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    _ps = r["per_subject"]
+                    _bcols = st.columns(len(_ps) if _ps else 1)
+                    for _bc, (_subj, _res) in zip(_bcols, _ps.items()):
+                        if _bc.button(
+                            f"**{_subj}**\n\nNet {_res['net']}\n\n"
+                            f"✅{_res['dogru']}  ❌{_res['yanlis']}  ⬜{_res['bos']}",
+                            key=f"detbtn_{r['id']}_{_subj}",
+                            use_container_width=True,
+                        ):
+                            st.session_state["_detay_sonuc"] = r["id"]
+                            st.session_state["_detay_ders"] = _subj
+                            st.session_state["_detay_acik"] = True
+                            st.rerun()
+
+            # Detay penceresi (PIN korumalı)
+            if st.session_state.get("_detay_acik"):
+                _hedef = next(
+                    (x for x in results if x["id"] == st.session_state.get("_detay_sonuc")), None
                 )
-                with st.expander(_title):
-                    st.markdown(f"**Sınav:** {r['exam_title']}  ·  *{r['category']}*")
-                    per_subject = r["per_subject"]
-                    _t_d = sum(v["dogru"] for v in per_subject.values())
-                    _t_y = sum(v["yanlis"] for v in per_subject.values())
-                    _t_b = sum(v["bos"] for v in per_subject.values())
-                    a1, a2, a3, a4 = st.columns(4)
-                    a1.metric("✅ Doğru", _t_d)
-                    a2.metric("❌ Yanlış", _t_y)
-                    a3.metric("⬜ Boş", _t_b)
-                    a4.metric("📊 Toplam Net", r["total_net"])
-                    if r.get("weighted_score") is not None:
-                        st.caption(f"Tahmini ağırlıklı puan göstergesi: {r['weighted_score']}")
-                    st.markdown("**Ders bazında**")
-                    _cols = st.columns(len(per_subject))
-                    for _c, (_subj, _res) in zip(_cols, per_subject.items()):
-                        _c.metric(
-                            _subj, f"Net: {_res['net']}",
-                            f"D:{_res['dogru']} Y:{_res['yanlis']} B:{_res['bos']}",
-                        )
-                    _detail = r.get("answers_detail")
-                    if _detail:
-                        st.markdown("**Yanlış ve boş bıraktığın sorular**")
-                        for _section, _subjects in _detail.items():
-                            for _subject, _rows in _subjects.items():
-                                _wrong = [x for x in _rows if x["durum"] != "dogru"]
-                                if not _wrong:
-                                    st.caption(f"{_subject}: tüm sorular doğru! 🎉")
-                                    continue
-                                _dfd = pd.DataFrame(_wrong)
-                                _dfd["durum"] = _dfd["durum"].map(
-                                    {"yanlis": "❌ Yanlış", "bos": "⬜ Boş"}
-                                )
-                                st.caption(f"{_subject}")
-                                st.dataframe(_dfd, use_container_width=True, hide_index=True)
+                if _hedef is not None:
+                    _detay_penceresi(_hedef, st.session_state.get("_detay_ders"))
 
 
 # ================================================================= TAB: ADMIN
@@ -1764,6 +2031,41 @@ if st.session_state.is_admin:
 
         # ---------------- Hesap ayarları (admin kullanıcı adı / şifre) ----------------
         elif admin_section == "Hesap Ayarları":
+            st.markdown("#### 🔐 Rapor PIN kodu")
+            st.caption(
+                "Öğrenci kendi raporunda bir dersin kutucuğuna dokunduğunda, soru bazlı "
+                "döküm (hangi soruyu yanlış yaptı, doğrusu neydi) bu PIN kodu sorularak "
+                "açılır. **Boş bırakırsanız PIN sorulmaz**, döküm herkese açık olur."
+            )
+            _mevcut_pin = db.get_setting("rapor_pin", "") or ""
+            st.text_input(
+                "Şu anki PIN",
+                value=("(belirlenmemiş)" if not _mevcut_pin else "•" * len(_mevcut_pin)),
+                disabled=True, key="pin_mevcut_gosterim",
+            )
+            _yeni_pin = st.text_input(
+                "Yeni PIN kodu", type="password", key="pin_yeni",
+                help="Sadece rakam kullanmanız önerilir (ör. 4-6 haneli).",
+            )
+            _pc1, _pc2 = st.columns(2)
+            if _pc1.button("PIN'i Kaydet", type="primary", key="pin_kaydet"):
+                _t = _yeni_pin.strip()
+                if _t and len(_t) < 4:
+                    st.error("PIN en az 4 karakter olmalı.")
+                else:
+                    db.set_setting("rapor_pin", _t)
+                    st.session_state["_admin_flash"] = (
+                        "success",
+                        "✅ Rapor PIN kodu güncellendi." if _t
+                        else "✅ PIN kaldırıldı; döküm artık PIN sorulmadan açılacak.",
+                    )
+                    st.rerun()
+            if _pc2.button("PIN'i Kaldır", key="pin_kaldir"):
+                db.set_setting("rapor_pin", "")
+                st.session_state["_admin_flash"] = ("success", "PIN kaldırıldı.")
+                st.rerun()
+
+            st.divider()
             st.markdown("#### Kullanıcı adını değiştir")
             st.caption("Kullanıcı adınızı değiştirmek için mevcut şifrenizi girmeniz gerekir.")
             cur_username_display = st.session_state.get("admin_username", config.ADMIN_USERNAME)

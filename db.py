@@ -116,6 +116,20 @@ def init_db():
         c.execute("ALTER TABLE results ADD COLUMN attempt_no INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass  # sütun zaten var
+    # "tam" = sinavin tamami cozuldu, "yanlis" = sadece onceki yanlis/bos
+    # birakilan sorular tekrar cozuldu ("ikinci sans" modu).
+    try:
+        c.execute("ALTER TABLE results ADD COLUMN mode TEXT DEFAULT 'tam'")
+    except sqlite3.OperationalError:
+        pass  # sütun zaten var
+
+    # Uygulama ayarlari (ornegin rapor PIN kodu) icin basit anahtar-deger tablosu
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )"""
+    )
 
     conn.commit()
     conn.close()
@@ -490,14 +504,36 @@ def delete_exam(exam_id):
 
 # ---------- results ----------
 
-def add_result(exam_id, student_name, per_subject, total_net, weighted_score, answers_detail=None, attempt_no=0):
+def get_setting(key, default=None):
+    conn = get_conn()
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    conn.close()
+    return row["value"] if row else default
+
+
+def set_setting(key, value):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_result(exam_id, student_name, per_subject, total_net, weighted_score,
+               answers_detail=None, attempt_no=0, mode="tam"):
     """Her çağrı YENİ bir satır ekler (üzerine yazmaz) -- böylece aynı öğrenci
-    aynı denemeyi 10 kere çözse bile 10 ayrı sonuç kaydı tutulur."""
+    aynı denemeyi 10 kere çözse bile 10 ayrı sonuç kaydı tutulur.
+
+    mode: "tam"    -> sinavin tamami cozuldu
+          "yanlis" -> "ikinci sans": sadece onceki yanlis/bos sorular cozuldu"""
     conn = get_conn()
     c = conn.cursor()
     c.execute(
-        """INSERT INTO results (exam_id, student_name, per_subject, total_net, weighted_score, created_at, answers_detail, attempt_no)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO results (exam_id, student_name, per_subject, total_net, weighted_score, created_at, answers_detail, attempt_no, mode)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             exam_id,
             student_name,
@@ -507,6 +543,7 @@ def add_result(exam_id, student_name, per_subject, total_net, weighted_score, an
             datetime.now().isoformat(timespec="seconds"),
             json.dumps(answers_detail, ensure_ascii=False) if answers_detail is not None else None,
             attempt_no,
+            mode,
         ),
     )
     conn.commit()
