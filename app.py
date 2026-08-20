@@ -124,6 +124,70 @@ def _tarih_bicimle(ham):
         return str(ham or "")
 
 
+def _tablo(df):
+    """Basit, SABIT bir tablo cizer.
+
+    ONEMLI - TABLETTEKI "KAYAN KUTU" SORUNU: Streamlit'in normal tablosu
+    (st.dataframe) etkilesimli bir bilesendir; bir hucrenin metni sutuna
+    sigmadiginda, uzerine gelindiginde/dokunuldugunda o hucreyi buyutup
+    tablonun DISINA tasan ayri bir kutu olarak gosterir. Tablette parmakla
+    dokunmak "uzerine gelme" sayildigi icin bu kutu surekli aciliyor ve
+    ekranda bagimsiz, bozuk gorunumlu bir kare olarak kaliyordu (paylasilan
+    ekran goruntusundeki "8. Sınıf (LGS)" karesi tam olarak buydu).
+
+    Bu yuzden rapor tablolari artik duz HTML olarak ciziliyor: dokunmaya
+    tepki vermez, hucre baloncugu yoktur, metin sigmazsa alt satira kayar
+    ve dar ekranda yatay kaydirilabilir."""
+    html = df.to_html(index=False, escape=False, border=0)
+    st.markdown(
+        f'<div class="lgs-tablo">{html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _ozet_penceresi(r):
+    """Bir sinav sonucunun OZETINI (net, dogru/yanlis/bos) tam genislikte bir
+    pencerede gosterir. Ayrintili soru dokumu burada YOK -- o, PIN korumali
+    _detay_penceresi()'nde. Amac tablette sonucun kirpilmadan gorunmesi."""
+    def _govde():
+        st.markdown(
+            f"**{r['exam_title']}**  ·  *{r['category']}*  \n"
+            f"🗓️ **{_tarih_bicimle(r.get('created_at'))}**"
+            + ("  ·  🎯 İkinci şans turu" if r.get("mode") == "yanlis" else "")
+        )
+        ps = r["per_subject"]
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("✅ Doğru", sum(v["dogru"] for v in ps.values()))
+        a2.metric("❌ Yanlış", sum(v["yanlis"] for v in ps.values()))
+        a3.metric("⬜ Boş", sum(v["bos"] for v in ps.values()))
+        a4.metric("📊 Toplam Net", r["total_net"])
+        _tablo(pd.DataFrame([
+            {
+                "Ders": k, "✅ Doğru": v["dogru"], "❌ Yanlış": v["yanlis"],
+                "⬜ Boş": v["bos"], "Net": v["net"],
+            }
+            for k, v in ps.items()
+        ]))
+        if r.get("weighted_score") is not None:
+            st.caption(f"Tahmini ağırlıklı puan göstergesi: {r['weighted_score']}")
+        st.info("Hangi soruyu yanlış yaptığını görmek için **Gelişim Raporum** sekmesindeki "
+                "ders kutucuğuna dokun (PIN kodu gerekir).")
+        if st.button("Kapat", key=f"_ozet_kapat_{r['id']}", use_container_width=True):
+            st.session_state.pop("_ozet_sonuc", None)
+            st.rerun()
+
+    dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+    if dialog:
+        @dialog("📊 Sınav Sonucu", width="large")
+        def _pencere():
+            _govde()
+        _pencere()
+    else:
+        with st.container(border=True):
+            st.markdown("#### 📊 Sınav Sonucu")
+            _govde()
+
+
 def _detay_icerigi(r, vurgu_ders=None):
     """Bir sınav sonucunun ayrıntılı dökümünü çizer."""
     st.markdown(
@@ -161,7 +225,7 @@ def _detay_icerigi(r, vurgu_ders=None):
                 "dogru_cevap": "Doğru Cevap", "durum": "Durum",
             })
             dfd["Durum"] = dfd["Durum"].map({"yanlis": "❌ Yanlış", "bos": "⬜ Boş"})
-            st.dataframe(dfd, use_container_width=True, hide_index=True)
+            _tablo(dfd)
 
 
 def _detay_penceresi(r, vurgu_ders=None):
@@ -448,6 +512,36 @@ def inject_css():
             border-radius: 10px !important; padding: 4px 8px !important;
         }
         .block-container {padding-top: 2.2rem; padding-left: 2rem; padding-right: 2rem; max-width: 100%;}
+
+        /* Rapor tablolari (bkz. _tablo()): dokunmaya tepki vermeyen, dar
+           ekranda yatay kaydirilabilen sade tablo. */
+        .lgs-tablo {overflow-x: auto; -webkit-overflow-scrolling: touch;}
+        .lgs-tablo table {
+            border-collapse: collapse; width: 100%; font-size: 0.95rem;
+        }
+        .lgs-tablo th {
+            background: #E2E8F0; color: #0F172A; text-align: left;
+            padding: 10px 12px; border-bottom: 2px solid #CBD5E1; white-space: nowrap;
+        }
+        .lgs-tablo td {
+            padding: 9px 12px; border-bottom: 1px solid #E2E8F0; vertical-align: top;
+        }
+        .lgs-tablo tr:nth-child(even) td {background: #F8FAFC;}
+
+        /* ---- TABLET / TELEFON: yan yana iki sutun sigmadiginda alt alta ---- */
+        @media (max-width: 1100px) {
+            /* Streamlit'in yatay sutun gruplari dikey siraya gecer, boylece
+               PDF ve Optik Form ust uste gelir; sonuc tablosu kirpilmaz. */
+            div[data-testid="stHorizontalBlock"] {flex-wrap: wrap !important;}
+            div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+                min-width: 100% !important; flex: 1 1 100% !important;
+            }
+            .block-container {padding-left: 0.8rem; padding-right: 0.8rem;}
+        }
+        /* Dar ekranda ders sonuc kutulari da alt alta rahat sigsin */
+        @media (max-width: 640px) {
+            div[data-testid="stMetric"] {padding: 10px 8px;}
+        }
         div[data-baseweb="tab-list"] {
             overflow-x: visible !important;
             flex-wrap: wrap;
@@ -687,7 +781,7 @@ if not st.session_state.student_name and not st.session_state.is_admin:
                 for k, v in _ist["kategoriler"].items()
             ]
         )
-        st.dataframe(_kat_df, use_container_width=True, hide_index=True)
+        _tablo(_kat_df)
 
     st.divider()
     c1, c2 = st.columns([3, 2])
@@ -782,18 +876,15 @@ with tabs[0]:
     _s4.metric("📈 Tüm Çözülenler", _ist["toplam_sonuc"])
     with st.expander("📂 Bölüm bölüm dağılım"):
         if _ist["kategoriler"]:
-            st.dataframe(
-                pd.DataFrame([
-                    {
-                        "Bölüm": k,
-                        "Deneme/Test": v["deneme"],
-                        "Toplam Soru": v["soru"],
-                        "Çözülme Sayısı": v["cozulen"],
-                    }
-                    for k, v in _ist["kategoriler"].items()
-                ]),
-                use_container_width=True, hide_index=True,
-            )
+            _tablo(pd.DataFrame([
+                {
+                    "Bölüm": k,
+                    "Deneme/Test": v["deneme"],
+                    "Toplam Soru": v["soru"],
+                    "Çözülme Sayısı": v["cozulen"],
+                }
+                for k, v in _ist["kategoriler"].items()
+            ]))
         else:
             st.caption("Henüz hiç deneme eklenmemiş.")
 
@@ -835,6 +926,18 @@ with tabs[0]:
         else:
             selected_exam_id = None
             st.info("Bu kategoride henüz bir deneme yok. Admin panelinden ekleyin.")
+
+    # Büyük pencerede sonuç özeti istendiyse burada açılır.
+    if st.session_state.get("_ozet_sonuc"):
+        _oz = next(
+            (x for x in db.get_results(student_name=st.session_state.student_name)
+             if x["id"] == st.session_state["_ozet_sonuc"]),
+            None,
+        )
+        if _oz:
+            _ozet_penceresi(_oz)
+        else:
+            st.session_state.pop("_ozet_sonuc", None)
 
     if selected_exam_id:
         exam = db.get_exam(selected_exam_id)
@@ -923,6 +1026,16 @@ with tabs[0]:
                 else:
                     st.success("✅ Bu denemeyi zaten çözdünüz. Sonuçlarınız:")
                 st.caption(f"🗓️ Çözüm tarihi: **{_tarih_bicimle(existing_result.get('created_at'))}**")
+
+                # TABLET: Sonuç tablosu dar ekranda optik formun altında
+                # kırpılıp tam görünmüyordu. Bu düğme sonucu ekranın ortasında,
+                # tam genişlikte bir pencerede açar.
+                if st.button("🔍 Sonucu Büyük Pencerede Aç", key=f"bigres_{existing_result['id']}",
+                             use_container_width=True):
+                    st.session_state["_ozet_sonuc"] = existing_result["id"]
+                    st.rerun()
+                st.caption("📊 Ayrıntılı döküm için **Gelişim Raporum** sekmesine geçebilirsiniz.")
+
                 per_subject = existing_result["per_subject"]
                 total_net = existing_result["total_net"]
                 weighted_score = existing_result["weighted_score"]
@@ -1148,14 +1261,8 @@ with tabs[1]:
                     for r in results
                 ]
             )
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "🗓️ Tarih": st.column_config.TextColumn("🗓️ Sınav Tarihi", width="medium"),
-                },
-            )
+            df = df.rename(columns={"🗓️ Tarih": "🗓️ Sınav Tarihi"})
+            _tablo(df)
             _tam = [r for r in results if r.get("mode") != "yanlis"]
             if len(_tam) >= 2:
                 _cd = pd.DataFrame(
@@ -1188,7 +1295,7 @@ with tabs[1]:
                     ),
                 })
             if _satirlar:
-                st.dataframe(pd.DataFrame(_satirlar), use_container_width=True, hide_index=True)
+                _tablo(pd.DataFrame(_satirlar))
                 _gelisen = [s for s in _satirlar if isinstance(s["Değişim"], float) and s["Değişim"] > 0]
                 if _gelisen:
                     st.success(
