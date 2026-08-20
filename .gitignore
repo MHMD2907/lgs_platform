@@ -1,0 +1,39 @@
+# =====================================================================
+#  GİZLİLİK KORUMASI
+#  GitHub deposu HERKESE AÇIK. Bu dosya, aşağıdaki özel şeylerin
+#  yanlışlıkla depoya yüklenmesini engeller. Bir dosyayı buraya yazmak,
+#  "bu asla GitHub'a gitmesin" demektir.
+# =====================================================================
+
+# --- ŞİFRELER --- Yönetici şifresi ve veritabanı bağlantı adresi burada
+# durur. Bu dosya ASLA GitHub'a yüklenmemeli; bulutta çalışırken aynı
+# bilgiler Streamlit Cloud'un kendi "Secrets" kutusuna yazılır.
+.streamlit/secrets.toml
+secrets.toml
+
+# --- ÖĞRENCİ VERİLERİ --- Öğrenci adları, şifre özetleri ve sınav
+# sonuçları bu dosyada tutulur. Herkese açık bir depoda bulunmamalı.
+*.db
+*.sqlite
+*.sqlite3
+lgs_platform.db
+
+# --- CEVAP ANAHTARLI PDF'LER --- Öğrencinin görmemesi gereken orijinal
+# kitapçıklar. (Zaten uygulama bunları "static" dışında saklıyor.)
+private_pdfs/
+
+# --- İNDİRİLEN / ÜRETİLEN PDF'LER --- Boyutları büyük, gerektiğinde
+# yeniden indirilebilir; depoyu şişirmelerine gerek yok.
+static/pdfs/
+*.pdf
+
+# --- Google Drive erişim bilgileri ---
+credentials.json
+token.json
+
+# --- Python geçici dosyaları ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
