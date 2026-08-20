@@ -4,6 +4,9 @@ pdfplumber>=0.11
 PyPDF2>=3.0
 pycryptodome>=3.20   # MEB'in resmi LGS PDF'leri şifreli (AES) olduğu için gerekli
 requests>=2.31
+# Kalıcı veritabanı (Supabase/PostgreSQL) bağlantısı için. DB_URL ayarlanmamışsa
+# hiç kullanılmaz; uygulama eskisi gibi yerel dosyayla çalışır.
+psycopg[binary]>=3.1
 Pillow>=10.0         # PDF'leri küçültmek (öğrenciye gösterilen kitapçığın boyutunu düşürmek) için
 
 # Google Drive entegrasyonu için (opsiyonel; kullanmayacaksanız kurmasanız da olur)

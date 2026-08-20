@@ -1354,6 +1354,30 @@ if st.session_state.is_admin:
     with tabs[2]:
         st.subheader("⚙️ Admin Paneli")
 
+        # ---- Verilerin kalıcı olup olmadığını açıkça göster ----
+        # Streamlit'in ücretsiz bulut sunucusunda uygulama klasörüne yazılan
+        # dosyalar her yeniden başlatmada silinir. Bu satır, kalıcı veritabanı
+        # bağlantısının gerçekten devrede olup olmadığını tek bakışta gösterir.
+        try:
+            _kalici = db.is_kalici()
+        except AttributeError:
+            _kalici = None
+        if _kalici is True:
+            st.success(
+                "🔒 **Veriler kalıcı veritabanında saklanıyor.** Öğrenci hesapları ve "
+                "sınav sonuçları, uygulama güncellense de silinmez.",
+                icon="✅",
+            )
+        elif _kalici is False:
+            st.warning(
+                "⚠️ **Veriler bu bilgisayarda/sunucuda yerel dosyada tutuluyor.** "
+                "Kendi bilgisayarınızda çalışıyorsanız bu normaldir, veriler kalıcıdır. "
+                "Ama **Streamlit bulutunda** çalışıyorsanız, uygulama her güncellendiğinde "
+                "veya bir süre kullanılmayıp uykuya daldıktan sonra **öğrenci hesapları ve "
+                "sonuçlar silinir.** Kalıcı hale getirmek için Streamlit Cloud → Settings → "
+                "Secrets bölümüne `DB_URL` satırını ekleyin."
+            )
+
         # Bir işlem (örn. deneme ekleme) bittiğinde st.rerun() çağırıyoruz ki
         # "Sınav Çöz" sekmesi de hemen güncellensin -- ama bu, o an ekranda
         # olan yeşil "başarılı" mesajının göz açıp kapayana kadar kaybolup
