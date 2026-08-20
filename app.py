@@ -1519,6 +1519,42 @@ if st.session_state.is_admin:
                         "baştaki soruları hiç sorulmaz. Kitabın tam sürümünü bulursanız aynı "
                         "işlem bütün soruları ekler."
                     )
+                # ---- Ders ders döküm: hangi test neden eklenemiyor? ----
+                # Genel uyarı ("50 testin cevap anahtarı yok") kafa karıştırıyordu:
+                # bir ders hem listede görünüyor hem de uyarıda geçiyordu. Sebebi,
+                # bazı derslerin KISMEN eksik olması (ör. Matematik'in 4-5-6.
+                # testlerinin anahtarı kitapta yok, diğerlerininki var). Bu tablo
+                # durumu ders ders net gösteriyor.
+                _ozet = {}
+                for _t in _testler:
+                    _d = _ozet.setdefault(_t["ders"], {"bulunan": 0, "eklenebilir": 0})
+                    _d["bulunan"] += 1
+                    if _t.get("cevaplar") and _t.get("numaralar"):
+                        _d["eklenebilir"] += 1
+                st.markdown("##### 📊 Ders ders durum")
+                _tablo(pd.DataFrame([
+                    {
+                        "Ders": _d,
+                        "Kitapta bulunan": _v["bulunan"],
+                        "Eklenebilir": _v["eklenebilir"],
+                        "Eklenemeyen": _v["bulunan"] - _v["eklenebilir"],
+                        "Sebep": (
+                            "—"
+                            if _v["eklenebilir"] == _v["bulunan"]
+                            else ("Bu dersin cevap anahtarı PDF'te hiç yok"
+                                  if _v["eklenebilir"] == 0
+                                  else "Bazı testlerin cevap anahtarı PDF'te eksik")
+                        ),
+                    }
+                    for _d, _v in sorted(_ozet.items())
+                ]))
+                st.caption(
+                    "**Eklenemeyenler neden eklenemiyor?** Bir testi puanlayabilmek için cevap "
+                    "anahtarı şart. Bu PDF'in sonundaki cevap anahtarı bölümü eksik: bazı derslerin "
+                    "anahtarı hiç yok, bazılarında birkaç test atlanmış. Anahtarı olmayan testi "
+                    "eklemek, çocuğun çözüp sonuç alamaması demek olurdu; o yüzden sistem onları "
+                    "atlıyor. Kitabın **tam sürümünü** bulursanız aynı işlem hepsini ekler."
+                )
                 for _u in st.session_state.get("_qb_uyarilar", []):
                     st.warning(_u)
                 if not _eklenebilir:
