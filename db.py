@@ -12,6 +12,7 @@ uzerinden okunup sunucu tarafinda (bu bilgisayarda) karsilastirilir.
 
 import sqlite3
 import json
+import re
 import os
 import hashlib
 import secrets
@@ -28,11 +29,167 @@ DEFAULT_CATEGORIES = [
 ]
 
 
+# =====================================================================
+#  VERİTABANI BAĞLANTISI - İKİ FARKLI YERDE ÇALIŞABİLİR
+#
+#  NEDEN: Streamlit'in ücretsiz bulut sunucusunda, uygulamanın kendi
+#  klasörüne yazılan dosyalar KALICI DEĞİLDİR. Uygulama her güncellemede
+#  veya bir süre kullanılmayıp uykuya daldıktan sonra yeniden başlarken
+#  sıfırdan kurulur ve o klasördeki her şey silinir. Yani veritabanı
+#  dosyası (öğrenci hesapları, sınav sonuçları) kaybolur.
+#
+#  ÇÖZÜM: Veriler, uygulamanın dışındaki kalıcı bir veritabanında tutulur
+#  (Supabase - ücretsiz PostgreSQL). Bağlantı adresi Streamlit'in gizli
+#  "Secrets" kutusuna DB_URL adıyla yazılır; kod onu oradan okur, adres
+#  hiçbir zaman GitHub'a girmez.
+#
+#  DB_URL tanımlıysa   -> Supabase (PostgreSQL), veriler kalıcı
+#  DB_URL tanımlı değilse -> bilgisayardaki lgs_platform.db (eskisi gibi)
+#
+#  Böylece kendi bilgisayarınızda hiçbir kurulum yapmadan çalışmaya
+#  devam eder; bulutta ise veriler artık silinmez.
+# =====================================================================
+
+def _db_url():
+    """Streamlit'in Secrets kutusundan (ya da ortam değişkeninden) kalıcı
+    veritabanı adresini okur. Yoksa None döner -> yerel dosya kullanılır."""
+    url = os.environ.get("DB_URL")
+    if url:
+        return url.strip()
+    try:
+        import streamlit as st
+
+        return (st.secrets.get("DB_URL") or "").strip() or None
+    except Exception:
+        return None
+
+
+class _PgCursor:
+    """psycopg imlecini, kodun geri kalanının beklediği sqlite3 arayüzüne
+    benzetir: '?' yer tutucularını '%s' yapar ve satırları sözlük döndürür."""
+
+    def __init__(self, cur):
+        self._cur = cur
+
+    def execute(self, sql, params=()):
+        self._cur.execute(_to_pg(sql), tuple(params))
+        return self
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    @property
+    def lastrowid(self):
+        # PostgreSQL'de lastrowid yoktur; INSERT'lere "RETURNING id"
+        # eklendiği için son dönen satırdan okunur.
+        try:
+            row = self._cur.fetchone()
+            return row["id"] if row else None
+        except Exception:
+            return None
+
+    def close(self):
+        self._cur.close()
+
+
+class _PgConn:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return _PgCursor(self._conn.cursor())
+
+    def execute(self, sql, params=()):
+        return self.cursor().execute(sql, params)
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
+
+def _to_pg(sql):
+    """SQLite yazımını PostgreSQL yazımına çevirir."""
+    sql = sql.replace("?", "%s")
+    sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    # "INSERT OR IGNORE INTO t (...) VALUES (...)" -> ON CONFLICT DO NOTHING
+    if sql.strip().upper().startswith("INSERT OR IGNORE"):
+        sql = sql.replace("INSERT OR IGNORE", "INSERT", 1).rstrip().rstrip(";")
+        sql += " ON CONFLICT DO NOTHING"
+    # ÖNEMLİ: Sürüm yükseltmelerinde "ALTER TABLE ... ADD COLUMN" komutları
+    # sütun zaten varsa hata verir. SQLite'ta bu hata yakalanıp geçiliyordu;
+    # ama PostgreSQL'de HATA VEREN BİR KOMUT TÜM İŞLEMİ İPTAL ETTİĞİ için
+    # arkasından gelen komutlar da çalışmıyordu. "IF NOT EXISTS" ekleyerek
+    # hata hiç oluşmuyor.
+    if re.match(r"^\s*ALTER\s+TABLE\s+\S+\s+ADD\s+COLUMN\s+(?!IF\s+NOT\s+EXISTS)",
+                sql, re.IGNORECASE):
+        sql = re.sub(r"(ADD\s+COLUMN)\s+", r"\1 IF NOT EXISTS ", sql, count=1,
+                     flags=re.IGNORECASE)
+    # PostgreSQL'de REAL/TEXT zaten var; PRAGMA yok sayılır.
+    return sql
+
+
 def get_conn():
+    url = _db_url()
+    if url:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as e:
+            raise RuntimeError(
+                "Kalıcı veritabanı için gerekli 'psycopg' kütüphanesi kurulu değil. "
+                "requirements.txt dosyasını da GitHub'a yükleyip uygulamayı yeniden "
+                "başlatın."
+            ) from e
+
+        # ONEMLI - prepare_threshold=None:
+        # Supabase'e baglanti "pooler" (havuzlayici) uzerinden yapilir. Havuzun
+        # "transaction" kipinde her sorgu baska bir baglantiya dusebilir; psycopg
+        # ise birkac tekrardan sonra sorgulari sunucuda "hazirlanmis ifade" olarak
+        # saklamaya calisir ve o ifade digerbaglantida bulunamayinca
+        # "prepared statement does not exist" hatasi verir. Bu ayar hazirlanmis
+        # ifadeleri tamamen kapatir; boylece hem "session" hem "transaction"
+        # havuzuyla sorunsuz calisir.
+        try:
+            return _PgConn(
+                psycopg.connect(
+                    url, row_factory=dict_row, autocommit=False,
+                    prepare_threshold=None, connect_timeout=15,
+                )
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Kalıcı veritabanına bağlanılamadı. Streamlit'in Secrets bölümündeki "
+                f"DB_URL adresini kontrol edin (şifre kısmı doğru mu?). Hata: {e}"
+            ) from e
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def is_kalici():
+    """Veriler kalıcı bir veritabanında mı tutuluyor? (arayüzde göstermek için)"""
+    return _db_url() is not None
+
+
+def _insert_id(c, sql, params):
+    """Bir INSERT yapıp yeni satırın id'sini döndürür.
+
+    SQLite'ta bu bilgi cursor.lastrowid'den gelir; PostgreSQL'de böyle bir
+    şey olmadığı için sorguya "RETURNING id" eklenip sonuç okunur. Bu
+    fonksiyon iki durumu da tek yerde hallediyor ki çağıran kodun hangi
+    veritabanında olduğunu bilmesine gerek kalmasın."""
+    if isinstance(c, _PgCursor):
+        c.execute(sql.rstrip().rstrip(";") + " RETURNING id", params)
+        row = c.fetchone()
+        return row["id"] if row else None
+    c.execute(sql, params)
+    return c.lastrowid
 
 
 def init_db():
@@ -106,22 +263,22 @@ def init_db():
     # (var olan bir kuruluma dokunmadan yükseltme yapabilmek için).
     try:
         c.execute("ALTER TABLE results ADD COLUMN answers_detail TEXT")
-    except sqlite3.OperationalError:
-        pass  # sütun zaten var
+    except Exception:
+        pass  # sütun zaten var (SQLite hata verir, PostgreSQL'de IF NOT EXISTS ile hiç oluşmaz)
     try:
         c.execute("ALTER TABLE exams ADD COLUMN pdf_path_original TEXT")
-    except sqlite3.OperationalError:
-        pass  # sütun zaten var
+    except Exception:
+        pass  # sütun zaten var (SQLite hata verir, PostgreSQL'de IF NOT EXISTS ile hiç oluşmaz)
     try:
         c.execute("ALTER TABLE results ADD COLUMN attempt_no INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # sütun zaten var
+    except Exception:
+        pass  # sütun zaten var (SQLite hata verir, PostgreSQL'de IF NOT EXISTS ile hiç oluşmaz)
     # "tam" = sinavin tamami cozuldu, "yanlis" = sadece onceki yanlis/bos
     # birakilan sorular tekrar cozuldu ("ikinci sans" modu).
     try:
         c.execute("ALTER TABLE results ADD COLUMN mode TEXT DEFAULT 'tam'")
-    except sqlite3.OperationalError:
-        pass  # sütun zaten var
+    except Exception:
+        pass  # sütun zaten var (SQLite hata verir, PostgreSQL'de IF NOT EXISTS ile hiç oluşmaz)
 
     # Uygulama ayarlari (ornegin rapor PIN kodu) icin basit anahtar-deger tablosu
     c.execute(
@@ -404,9 +561,16 @@ def verify_student(username, password):
 
 def get_categories():
     conn = get_conn()
-    rows = conn.execute("SELECT name FROM categories ORDER BY rowid").fetchall()
+    # NOT: Eskiden "ORDER BY rowid" kullanılıyordu; "rowid" SQLite'a özel bir
+    # sütundur ve PostgreSQL'de yoktur. Sıralamayı SQL'e bırakmak yerine
+    # burada yapıyoruz: önce hazır kategoriler kendi sırasıyla, sonra sonradan
+    # eklenenler alfabetik. Böylece iki veritabanında da aynı sonuç çıkar.
+    rows = conn.execute("SELECT name FROM categories").fetchall()
     conn.close()
-    return [r["name"] for r in rows]
+    adlar = [r["name"] for r in rows]
+    hazir = [c for c in DEFAULT_CATEGORIES if c in adlar]
+    digerleri = sorted(a for a in adlar if a not in DEFAULT_CATEGORIES)
+    return hazir + digerleri
 
 
 def add_category(name):
@@ -423,7 +587,8 @@ def add_category(name):
 def add_exam(title, category, pdf_path, structure, answer_key, source="manuel", pdf_path_original=None):
     conn = get_conn()
     c = conn.cursor()
-    c.execute(
+    exam_id = _insert_id(
+        c,
         """INSERT INTO exams (title, category, source, pdf_path, structure, answer_key, created_at, pdf_path_original)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
@@ -438,7 +603,6 @@ def add_exam(title, category, pdf_path, structure, answer_key, source="manuel", 
         ),
     )
     conn.commit()
-    exam_id = c.lastrowid
     conn.close()
     return exam_id
 
@@ -531,7 +695,8 @@ def add_result(exam_id, student_name, per_subject, total_net, weighted_score,
           "yanlis" -> "ikinci sans": sadece onceki yanlis/bos sorular cozuldu"""
     conn = get_conn()
     c = conn.cursor()
-    c.execute(
+    result_id = _insert_id(
+        c,
         """INSERT INTO results (exam_id, student_name, per_subject, total_net, weighted_score, created_at, answers_detail, attempt_no, mode)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
@@ -547,7 +712,6 @@ def add_result(exam_id, student_name, per_subject, total_net, weighted_score,
         ),
     )
     conn.commit()
-    result_id = c.lastrowid
     conn.close()
     return result_id
 
