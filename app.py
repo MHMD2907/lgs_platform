@@ -26,6 +26,7 @@ import db
 import drive_sync
 import parsing
 import scoring
+import soru_bankasi
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # PDF'ler "static" klasoru altinda tutulur; Streamlit bu klasoru dogrudan
@@ -292,12 +293,40 @@ def inject_css():
         <style>
         /* Streamlit'in kendi ust seridi (Share / GitHub / kalem ikonlari) ve
            alt bilgi satiri gizlenir -- boylece ekran gercek bir uygulama gibi
-           gorunur ve PDF'e daha fazla dikey yer kalir. */
-        #MainMenu, footer, header {visibility: hidden;}
-        div[data-testid="stToolbar"] {display: none !important;}
+           gorunur ve PDF'e daha fazla dikey yer kalir.
+
+           ÖNEMLİ - ÖNCEKİ SÜRÜMDEKİ HATA (tablette menü kayboluyordu):
+           Burada önce 'header', sonra da üst araç çubuğunun TAMAMI
+           (stToolbar) gizlenmişti. Ama kenar çubuğu (giriş menüsü)
+           kapatılınca onu geri AÇAN "»" düğmesi tam olarak o araç
+           çubuğunun İÇİNDE duruyor; üst öğe gizlenince o düğme de sıfır
+           boyuta düşüyor ve menüyü geri açmanın HİÇBİR yolu kalmıyordu.
+           (Tarayıcıda ölçüldü: düğmenin genişliği ve yüksekliği 0 çıkıyordu.)
+           Bu yüzden artık araç çubuğu bir bütün olarak gizlenmiyor; sadece
+           tek tek gereksiz düğmeler gizleniyor ve açma düğmesi açıkça
+           görünür kılınıyor. */
+        footer {visibility: hidden;}
+        header[data-testid="stHeader"] {background: transparent !important;}
         div[data-testid="stDecoration"] {display: none !important;}
         div[data-testid="stStatusWidget"] {display: none !important;}
-        .block-container {padding-top: 1.2rem; padding-left: 2rem; padding-right: 2rem; max-width: 100%;}
+        /* Gereksiz düğmeler: "Deploy", üç nokta menüsü ve Streamlit Cloud'un
+           "Manage app" / hesap rozeti (bunlar Streamlit hesabına götürüyordu,
+           öğrencinin görmesine gerek yok). */
+        button[data-testid="stMainMenuButton"],
+        button[data-testid="stBaseButton-header"],
+        div[data-testid="stAppDeployButton"],
+        div[data-testid="stAppViewerBadge"],
+        div[data-testid="manage-app-button"],
+        div[class^="viewerBadge"], div[class*=" viewerBadge"],
+        a[href*="streamlit.io/cloud"] {display: none !important;}
+        /* Menüyü geri açan düğme HER ZAMAN görünür ve rahat tıklanır olsun. */
+        button[data-testid="stExpandSidebarButton"] {
+            display: flex !important; visibility: visible !important;
+            opacity: 1 !important; z-index: 999999 !important;
+            background: #2563EB !important; color: #ffffff !important;
+            border-radius: 10px !important; padding: 4px 8px !important;
+        }
+        .block-container {padding-top: 2.2rem; padding-left: 2rem; padding-right: 2rem; max-width: 100%;}
         div[data-baseweb="tab-list"] {
             overflow-x: visible !important;
             flex-wrap: wrap;
@@ -329,7 +358,13 @@ def build_generic_structure(subject_rows):
 
 # ---------------------------------------------------------------- app shell
 
-st.set_page_config(page_title=config.APP_TITLE, layout="wide", page_icon="📚")
+# initial_sidebar_state="expanded": tablette/telefonda sayfa her acildiginda
+# giris menusu ACIK gelsin (kullanici menuyu bulamayip giris yapamaz duruma
+# dusmesin).
+st.set_page_config(
+    page_title=config.APP_TITLE, layout="wide", page_icon="📚",
+    initial_sidebar_state="expanded",
+)
 inject_css()
 
 if "is_admin" not in st.session_state:
@@ -489,6 +524,41 @@ with st.sidebar:
                 "Admin Paneli → Öğrenciler bölümünden bir öğrenci ekleyin."
             )
 
+# ÖNEMLİ - GÜVENLİK/KARŞILAMA EKRANI: Daha önce uygulama açılır açılmaz,
+# hiç giriş yapılmadan doğrudan "Sınav Çöz" sekmesi geliyordu; yani adresi
+# bilen herkes denemelere ulaşabiliyordu. Artık giriş yapılmadıysa sadece
+# aşağıdaki karşılama ekranı gösterilir ve script burada durur.
+if not st.session_state.student_name and not st.session_state.is_admin:
+    st.markdown(
+        f"""
+        <div style="text-align:center; padding:3.5rem 1rem 2rem 1rem;">
+          <div style="font-size:4.5rem; line-height:1;">📚</div>
+          <h1 style="margin:0.6rem 0 0.2rem 0; color:#1E3A8A;">{config.APP_TITLE}</h1>
+          <p style="font-size:1.15rem; color:#475569; margin-top:0.4rem;">
+            Geçmiş yıl LGS denemelerini çöz, netlerini anında gör, gelişimini takip et.
+          </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.info(
+            "👈 Başlamak için **soldaki menüden giriş yapın.**\n\n"
+            "Menüyü göremiyorsanız, sol üstteki **»** düğmesine dokunun.",
+            icon="🔐",
+        )
+        st.markdown(
+            """
+            | | |
+            |---|---|
+            | 📝 | Deneme çöz, cevapların **otomatik kaydedilsin** |
+            | ⏸️ | Yarıda kalırsan **kaldığın yerden devam et** |
+            | 📊 | Netlerini ve **gelişim grafiğini** gör |
+            """
+        )
+    st.stop()
+
 tab_names = ["📱 Sınav Çöz", "📊 Gelişim Raporum"]
 if st.session_state.is_admin:
     tab_names.append("⚙️ Admin Paneli")
@@ -644,18 +714,34 @@ with tabs[0]:
                     subject_tabs = st.tabs([s for _, s in all_subjects])
                     for (section, subject), stab in zip(all_subjects, subject_tabs):
                         with stab:
-                            count = structure[section][subject]["count"]
+                            _meta = structure[section][subject]
+                            count = _meta["count"]
+                            # ÖNEMLİ - OPTİK FORM PDF İLE AYNI NUMARALARI
+                            # GÖSTERİR: Soru bankasından alınan bazı testlerin
+                            # kitaptaki ilk sayfası olmadığı için sorular 1'den
+                            # değil, örneğin 4'ten başlar. Böyle testlerde
+                            # "numbers" alanında sayfadaki GERÇEK soru
+                            # numaraları durur ve optik form da "Soru 4, 5, 6, 7"
+                            # diye devam eder -- yoksa çocuk PDF'te 4. soruyu
+                            # okurken formda 1. soruyu işaretler ve her şey
+                            # kayar. "numbers" yoksa normal 1, 2, 3... kullanılır.
+                            numaralar = _meta.get("numbers") or list(range(1, count + 1))
                             saved_subject = saved.get(section, {}).get(subject, [])
+                            if numaralar and numaralar[0] != 1:
+                                st.caption(
+                                    f"ℹ️ Bu testin soruları kitapçıkta **{numaralar[0]}. sorudan** "
+                                    f"başlıyor; aşağıdaki numaralar PDF'tekilerle birebir aynıdır."
+                                )
                             answers = []
-                            for i in range(1, count + 1):
-                                prev = saved_subject[i - 1] if i - 1 < len(saved_subject) else "Boş"
+                            for _sira, _soru_no in enumerate(numaralar):
+                                prev = saved_subject[_sira] if _sira < len(saved_subject) else "Boş"
                                 default_index = options.index(prev) if prev in options else 4
                                 ans = st.radio(
-                                    f"{subject} - Soru {i}",
+                                    f"{subject} - Soru {_soru_no}",
                                     options,
                                     index=default_index,
                                     horizontal=True,
-                                    key=f"ans_{selected_exam_id}_{attempt_no}_{subject}_{i}",
+                                    key=f"ans_{selected_exam_id}_{attempt_no}_{subject}_{_soru_no}",
                                 )
                                 answers.append(ans)
                             user_answers[section][subject] = answers
@@ -665,6 +751,24 @@ with tabs[0]:
                 st.session_state[buf_key] = user_answers
                 if student_name:
                     db.save_progress(selected_exam_id, student_name, attempt_no, user_answers)
+
+                # ---- İlerleme sayacı: kaç soru işaretlendi / toplam kaç soru ----
+                _total_q = sum(
+                    structure[sec][sub]["count"] for sec, sub in all_subjects
+                )
+                _done_q = sum(
+                    1
+                    for sec, sub in all_subjects
+                    for a in user_answers[sec][sub]
+                    if a != "Boş"
+                )
+                _pct = _done_q / _total_q if _total_q else 0
+                st.progress(
+                    _pct,
+                    text=f"**{_done_q} / {_total_q} soru işaretlendi**  ·  %{round(_pct * 100)}",
+                )
+                if _done_q < _total_q:
+                    st.caption(f"Kalan: {_total_q - _done_q} soru")
 
                 submitted = st.button(
                     "✅ Sınavı Bitir ve Puanla",
@@ -721,6 +825,52 @@ with tabs[1]:
             chart_df = df[["Tarih", "Toplam Net"]].set_index("Tarih").sort_index()
             st.line_chart(chart_df)
 
+            # ---- Her sınavın üstüne basınca açılan detay penceresi ----
+            # (Aynı dökum admin tarafındaki "Öğrenci Raporları" bölümünde de var;
+            #  öğrenci kendi sayfasında SADECE görebilir, silemez.)
+            st.divider()
+            st.markdown("### 📋 Sınav Detayları")
+            st.caption("Bir sınavın üzerine dokunarak kaç doğru, kaç yanlış, kaç boş yaptığını görebilirsin.")
+            for r in results:
+                _title = (
+                    f"📝 {r['exam_title']}  ·  {r['created_at']}  ·  Net: {r['total_net']}"
+                )
+                with st.expander(_title):
+                    st.markdown(f"**Sınav:** {r['exam_title']}  ·  *{r['category']}*")
+                    per_subject = r["per_subject"]
+                    _t_d = sum(v["dogru"] for v in per_subject.values())
+                    _t_y = sum(v["yanlis"] for v in per_subject.values())
+                    _t_b = sum(v["bos"] for v in per_subject.values())
+                    a1, a2, a3, a4 = st.columns(4)
+                    a1.metric("✅ Doğru", _t_d)
+                    a2.metric("❌ Yanlış", _t_y)
+                    a3.metric("⬜ Boş", _t_b)
+                    a4.metric("📊 Toplam Net", r["total_net"])
+                    if r.get("weighted_score") is not None:
+                        st.caption(f"Tahmini ağırlıklı puan göstergesi: {r['weighted_score']}")
+                    st.markdown("**Ders bazında**")
+                    _cols = st.columns(len(per_subject))
+                    for _c, (_subj, _res) in zip(_cols, per_subject.items()):
+                        _c.metric(
+                            _subj, f"Net: {_res['net']}",
+                            f"D:{_res['dogru']} Y:{_res['yanlis']} B:{_res['bos']}",
+                        )
+                    _detail = r.get("answers_detail")
+                    if _detail:
+                        st.markdown("**Yanlış ve boş bıraktığın sorular**")
+                        for _section, _subjects in _detail.items():
+                            for _subject, _rows in _subjects.items():
+                                _wrong = [x for x in _rows if x["durum"] != "dogru"]
+                                if not _wrong:
+                                    st.caption(f"{_subject}: tüm sorular doğru! 🎉")
+                                    continue
+                                _dfd = pd.DataFrame(_wrong)
+                                _dfd["durum"] = _dfd["durum"].map(
+                                    {"yanlis": "❌ Yanlış", "bos": "⬜ Boş"}
+                                )
+                                st.caption(f"{_subject}")
+                                st.dataframe(_dfd, use_container_width=True, hide_index=True)
+
 
 # ================================================================= TAB: ADMIN
 if st.session_state.is_admin:
@@ -744,6 +894,7 @@ if st.session_state.is_admin:
             "İşlem seçin",
             [
                 "8. Sınıf LGS Denemesi Ekle",
+                "📚 Soru Bankasını Test Test Ayır",
                 "Diğer Kategori / Soru Bankası Ekle (Manuel)",
                 "Otomatik İndirme (Resmi EBA Arşivi)",
                 "URL'den PDF İndir",
@@ -757,8 +908,147 @@ if st.session_state.is_admin:
         )
         st.divider()
 
+        # ---------------- Soru bankasını test test ayır ----------------
+        if admin_section == "📚 Soru Bankasını Test Test Ayır":
+            st.markdown(
+                "Çok dersli bir **soru bankası PDF'i** yükleyin. Sistem kitabı tarayıp "
+                "içindeki her testi (**Türkçe - Sözcükte Anlam Test 3** gibi) ayrı ayrı bulur "
+                "ve kitabın sonundaki cevap anahtarıyla eşleştirir. Böylece çocuğunuz 50 soruluk "
+                "koca bir deneme yerine, **6-8 soruluk kısa konu testleri** çözebilir."
+            )
+            qb_file = st.file_uploader("Soru bankası PDF'i", type=["pdf"], key="qb_pdf")
+            qb_path_state = "_qb_path"
+
+            if qb_file is not None and st.button("📖 Kitabı Tara", type="primary"):
+                _qb_path = os.path.join(PRIVATE_DIR, "_soru_bankasi.pdf")
+                with open(_qb_path, "wb") as f:
+                    f.write(qb_file.getbuffer())
+                with st.spinner("Kitap taranıyor, testler ve cevap anahtarı bulunuyor..."):
+                    try:
+                        _testler, _anahtar, _uyarilar = soru_bankasi.testleri_bul(_qb_path)
+                    except Exception as e:
+                        _testler, _anahtar, _uyarilar = [], {}, [f"Kitap okunamadı: {e}"]
+                st.session_state[qb_path_state] = _qb_path
+                st.session_state["_qb_testler"] = _testler
+                st.session_state["_qb_uyarilar"] = _uyarilar
+                st.rerun()
+
+            _testler = st.session_state.get("_qb_testler")
+            if _testler:
+                _eklenebilir = [t for t in _testler if t.get("cevaplar") and t.get("numaralar")]
+                st.success(
+                    f"Kitapta **{len(_testler)} test** bulundu; bunlardan "
+                    f"**{len(_eklenebilir)} tanesi** eklenebilir durumda."
+                )
+                _kirpik = [t for t in _eklenebilir if (t.get("numaralar") or [1])[0] != 1]
+                if _kirpik:
+                    st.info(
+                        f"ℹ️ Bu PDF bir **tanıtım/örnek sürüm** gibi görünüyor: {len(_kirpik)} testin "
+                        "kitaptaki ilk sayfası dosyada yok, o testler ortadan (örneğin 4. sorudan) "
+                        "başlıyor. **Sorun değil** — sistem her testin sayfada gerçekten basılı olan "
+                        "sorularını bulur ve optik formu tam o numaralarla oluşturur, yani PDF'te "
+                        "4. soruyu okuyan çocuk formda da 4. soruyu işaretler. Sadece o testlerin "
+                        "baştaki soruları hiç sorulmaz. Kitabın tam sürümünü bulursanız aynı "
+                        "işlem bütün soruları ekler."
+                    )
+                for _u in st.session_state.get("_qb_uyarilar", []):
+                    st.warning(_u)
+                if not _eklenebilir:
+                    st.error("Cevap anahtarı okunabilen test yok, ekleme yapılamıyor.")
+                else:
+                    _dersler = sorted({t["ders"] for t in _eklenebilir})
+                    _secili_ders = st.selectbox("Ders", _dersler, key="qb_ders")
+                    _bu_ders = [t for t in _eklenebilir if t["ders"] == _secili_ders]
+
+                    def _qb_etiket(t):
+                        _nums = t.get("numaralar") or []
+                        if _nums and _nums[0] != 1:
+                            _ek = f"{len(_nums)} soru: kitapta {_nums[0]}-{_nums[-1]}"
+                        else:
+                            _ek = f"{len(_nums)} soru"
+                        return f"Test {t['test_no']} · {t['konu']} ({_ek})"
+
+                    _secilenler = st.multiselect(
+                        "Eklenecek testler",
+                        _bu_ders,
+                        default=_bu_ders,
+                        format_func=_qb_etiket,
+                        key="qb_secim",
+                    )
+                    st.caption(
+                        f"{len(_secilenler)} test seçili. Her test ayrı bir deneme olarak "
+                        f"**Soru Bankası - {_secili_ders}** kategorisine eklenir."
+                    )
+                    if st.button("✅ Seçilen Testleri Ekle", type="primary", disabled=not _secilenler):
+                        _kategori = f"Soru Bankası - {_secili_ders}"
+                        db.add_category(_kategori)
+                        _kaynak = st.session_state.get(qb_path_state)
+                        _flash, _eklendi, _atlandi = [], 0, 0
+                        _bar = st.progress(0.0, text="Testler ekleniyor...")
+                        for _n, _t in enumerate(_secilenler, start=1):
+                            _baslik = f"{_secili_ders} · Test {_t['test_no']} · {_t['konu']}"
+                            if db.exam_exists(_baslik, _kategori):
+                                _atlandi += 1
+                                _bar.progress(_n / len(_secilenler), text=f"{_n}/{len(_secilenler)}")
+                                continue
+                            _hedef = os.path.join(
+                                PDF_DIR,
+                                f"sb_{slugify(_secili_ders)}_{_t['test_no']}_{slugify(_t['konu'])}.pdf",
+                            )
+                            try:
+                                # Sayfada GERÇEKTEN basılı olan soru numaraları
+                                # (kitabın ilk sayfası yoksa test 4. sorudan
+                                # başlayabilir) -- optik form bunlarla birebir
+                                # aynı numaraları gösterecek.
+                                _numaralar = soru_bankasi.gorunen_sorular(
+                                    _kaynak, _t["sayfalar"], list(_t["cevaplar"].keys())
+                                )
+                                if not _numaralar:
+                                    _flash.append((
+                                        "error",
+                                        f"⚠️ {_baslik}: sayfadaki soru numaraları okunamadı, atlandı.",
+                                    ))
+                                    _bar.progress(_n / len(_secilenler), text=f"{_n}/{len(_secilenler)}")
+                                    continue
+                                soru_bankasi.test_pdf_olustur(_kaynak, _t["sayfalar"], _hedef)
+                                parsing._compress_pdf_for_display(_hedef)
+                                # Anahtarlar her ihtimale karşı sayıya çevriliyor
+                                # (oturumda saklanıp geri okunurken metne
+                                # dönüşmüş olabilir).
+                                _cev = {int(k): v for k, v in _t["cevaplar"].items()}
+                                _sirali = [_cev[k] for k in _numaralar]
+                                _yapi = {
+                                    "Genel": {
+                                        _secili_ders: {
+                                            "count": len(_sirali),
+                                            "coef": 1,
+                                            "numbers": _numaralar,
+                                        }
+                                    }
+                                }
+                                # ÖNEMLİ: Cevap anahtarı, yapı ile AYNI iki
+                                # katmanlı biçimde olmalı: bölüm -> ders -> liste.
+                                # (Tek katmanlı verildiğinde puanlama sessizce
+                                # 0 net üretiyordu -- testte yakalandı.)
+                                db.add_exam(
+                                    _baslik, _kategori, _hedef, _yapi,
+                                    {"Genel": {_secili_ders: _sirali}},
+                                    source="soru-bankasi",
+                                )
+                                _eklendi += 1
+                            except Exception as e:
+                                _flash.append(("error", f"❌ {_baslik}: {e}"))
+                            _bar.progress(_n / len(_secilenler), text=f"{_n}/{len(_secilenler)}")
+                        _flash.insert(0, (
+                            "success",
+                            f"✅ {_eklendi} test eklendi"
+                            + (f", {_atlandi} test zaten vardı (atlandı)." if _atlandi else "."),
+                        ))
+                        st.session_state["_admin_flash"] = _flash
+                        st.rerun()
+
         # ---------------- 8. Sınıf LGS ----------------
-        if admin_section == "8. Sınıf LGS Denemesi Ekle":
+        elif admin_section == "8. Sınıf LGS Denemesi Ekle":
             st.markdown("Sözel ve Sayısal kitapçıklarını (son sayfasında cevap anahtarı olan hallerini) yükleyin. "
                         "Sistem cevap anahtarını otomatik okuyup son sayfaları kırpacak; öğrenci cevap anahtarını göremeyecek.")
             exam_title = st.text_input("Deneme Adı (Örn: 2026 LGS A Kitapçığı)", key="lgs_title")

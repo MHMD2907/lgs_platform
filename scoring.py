@@ -65,11 +65,16 @@ def build_answer_detail(user_answers, answer_key, structure):
     detail = {}
     for section, subjects in structure.items():
         detail[section] = {}
-        for subject in subjects:
+        for subject, meta in subjects.items():
             u_list = user_answers.get(section, {}).get(subject, [])
             k_list = answer_key.get(section, {}).get(subject, [])
+            # Soru bankasindan alinan testlerde sorular 1'den baslamayabilir
+            # (kitapta o testin ilk sayfasi yoksa, sayfa 4. sorudan baslar).
+            # Bu durumda "numbers" alaninda KITAPTAKI GERCEK soru numaralari
+            # tutulur ve dokumde de o numaralar gosterilir; yoksa 1, 2, 3...
+            numaralar = (meta or {}).get("numbers") or list(range(1, len(k_list) + 1))
             rows = []
-            for i, (u, k) in enumerate(zip(u_list, k_list), start=1):
+            for i, (u, k) in zip(numaralar, zip(u_list, k_list)):
                 if u in BOS_ISARETLERI:
                     durum = "bos"
                 elif u == k:
