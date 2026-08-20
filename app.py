@@ -532,9 +532,15 @@ def inject_css():
         .lgs-tablo tr:nth-child(even) td {background: #F8FAFC;}
 
         /* ---- TABLET / TELEFON: yan yana iki sutun sigmadiginda alt alta ---- */
-        @media (max-width: 1100px) {
-            /* Streamlit'in yatay sutun gruplari dikey siraya gecer, boylece
-               PDF ve Optik Form ust uste gelir; sonuc tablosu kirpilmaz. */
+        /* ÖNEMLİ: Bu eşik önce 1100px idi; ama tabletin YATAY (yan çevrilmiş)
+           genişliği çoğu modelde 1024-1080px olduğu için, tam da yan yana
+           çalışması gereken durumda alt alta geçiyordu. Eşik 700px'e indirildi:
+           artık sadece TELEFON ve tabletin DİKEY kullanımında alt alta geçer,
+           yatay çevrildiğinde PDF ile optik form yan yana kalır. Ayrıca
+           öğrenci bunu "Görünüm" düğmesinden elle de seçebiliyor.
+           Ölçüm: tablet DİKEY ~768-820px (alt alta olmalı), tablet YATAY
+           ~1024-1180px (yan yana olmalı). Bu yüzden eşik 900px. */
+        @media (max-width: 900px) {
             div[data-testid="stHorizontalBlock"] {flex-wrap: wrap !important;}
             div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
                 min-width: 100% !important; flex: 1 1 100% !important;
@@ -1002,7 +1008,23 @@ with tabs[0]:
 
         existing_result = db.get_result_for_attempt(selected_exam_id, student_name, attempt_no)
 
-        col_pdf, col_form = st.columns([6, 4])
+        # ---- Görünüm seçimi: yan yana mı, alt alta mı? ----
+        # Tablet yatayken yan yana rahat okunur; dikeyken veya telefonda alt
+        # alta daha iyi. Cihaza göre otomatik ayarlanıyor ama öğrenci
+        # istediğinde elle de değiştirebilsin diye buraya bir düğme konuldu.
+        _gorunum = st.radio(
+            "Görünüm",
+            ["🖥️ Yan yana", "📱 Alt alta"],
+            horizontal=True,
+            key="_gorunum_secimi",
+            help="Tablet yatayken 'Yan yana', dikeyken 'Alt alta' daha rahat olur.",
+            label_visibility="collapsed",
+        )
+        if _gorunum.endswith("Alt alta"):
+            col_pdf = st.container()
+            col_form = st.container()
+        else:
+            col_pdf, col_form = st.columns([6, 4])
 
         with col_pdf:
             st.subheader(exam["title"])
@@ -1188,8 +1210,16 @@ with tabs[0]:
                 # Giriş yapılmış olsun ya da olmasın, cevaplar her zaman
                 # oturum belleğine yazılır (bkz. yukarıdaki buf_key notu).
                 st.session_state[buf_key] = user_answers
-                if student_name:
+                # ÖNEMLİ - HIZ: İlerleme her ekran yenilemesinde veritabanına
+                # yazılıyordu. Ama ekran, cevap değişmeden de yenileniyor
+                # (sayfa çevirme, görünüm değiştirme...). Boşuna yazmak hem
+                # Frankfurt'a fazladan gidiş-dönüş, hem de her yazma okuma
+                # önbelleğini sıfırladığı için tüm sayfayı yeniden sorgulatıyordu.
+                # Artık sadece cevaplar GERÇEKTEN değiştiyse yazılıyor.
+                _son_key = f"_son_kayit_{selected_exam_id}_{attempt_no}"
+                if student_name and st.session_state.get(_son_key) != user_answers:
                     db.save_progress(selected_exam_id, student_name, attempt_no, user_answers)
+                    st.session_state[_son_key] = json.loads(json.dumps(user_answers))
 
                 # ---- İlerleme sayacı: kaç soru işaretlendi / toplam kaç soru ----
                 _total_q = sum(
@@ -1746,7 +1776,22 @@ if st.session_state.is_admin:
             if st.button("🔎 Sayfayı Tara ve Kitapçıkları Bul", type="primary"):
                 _tani = []
                 with st.spinner("MEB sayfası taranıyor..."):
-                    _bulunan = bot.scrape_bursluluk(ayrinti=_tani)
+                    try:
+                        _bulunan = bot.scrape_bursluluk(ayrinti=_tani)
+                    except TypeError:
+                        # KISMİ GÜNCELLEME KORUMASI: GitHub'a app.py yüklenip
+                        # bot.py eski bırakılırsa, eski sürüm 'ayrinti'
+                        # parametresini tanımaz ve uygulama komple çökerdi.
+                        # Artık eski sürümle de çalışıyor, sadece teşhis bilgisi
+                        # olmuyor ve ekranda uyarı çıkıyor.
+                        _bulunan = bot.scrape_bursluluk()
+                        _tani.append(
+                            "⚠️ bot.py dosyanız eski sürümde — ayrıntılı teşhis yapılamıyor. "
+                            "GitHub'a güncel bot.py dosyasını da yükleyin."
+                        )
+                    except Exception as e:
+                        _bulunan = {}
+                        _tani.append(f"Beklenmeyen hata: {e}")
                 st.session_state[_bl_key] = {f"{y}|{s}": u for (y, s), u in _bulunan.items()}
                 st.session_state["_bursluluk_tani"] = _tani
                 st.rerun()

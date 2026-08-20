@@ -240,6 +240,66 @@ def is_kalici():
     return _db_url() is not None
 
 
+# =====================================================================
+#  OKUMA ÖNBELLEĞİ
+#
+#  NEDEN: Streamlit her tıklamada sayfanın TAMAMINI baştan çalıştırır.
+#  Ölçüldü: tek bir tıklamada ~17 ayrı sorgu Frankfurt'a gidip geliyordu
+#  (kategoriler, denemeler, sayaçlar, sonuçlar, ayarlar...). Her sorgu
+#  yaklaşık 50 ms gidiş-dönüş demek; toplamda her tuşa basış ~1 saniye
+#  boşuna bekleme. Kendi bilgisayarındaki dosyada bu süre sıfırdı, o yüzden
+#  Supabase'e geçince yavaşlık ortaya çıktı.
+#
+#  ÇÖZÜM: Sık okunan ve nadiren değişen bilgiler kısa süreliğine bellekte
+#  tutulur. Veriyi DEĞİŞTİREN her işlem (ekleme/silme/güncelleme) önbelleği
+#  komple temizler; böylece ekranda asla eski bilgi kalmaz.
+# =====================================================================
+_ONBELLEK = {}
+_ONBELLEK_SURESI = 20  # saniye
+_onbellek_kilit = threading.Lock()
+
+
+def _onbellek_temizle():
+    with _onbellek_kilit:
+        _ONBELLEK.clear()
+
+
+def _onbellekli(fn):
+    """Okuma fonksiyonlarını kısa süreli önbelleğe alır."""
+    import functools
+    import time as _t
+
+    @functools.wraps(fn)
+    def sarmal(*args, **kwargs):
+        anahtar = (fn.__name__, args, tuple(sorted(kwargs.items())))
+        simdi = _t.time()
+        with _onbellek_kilit:
+            kayit = _ONBELLEK.get(anahtar)
+            if kayit and (simdi - kayit[0]) < _ONBELLEK_SURESI:
+                return kayit[1]
+        sonuc = fn(*args, **kwargs)
+        with _onbellek_kilit:
+            _ONBELLEK[anahtar] = (simdi, sonuc)
+        return sonuc
+
+    return sarmal
+
+
+def _yazma(fn):
+    """Veriyi DEĞİŞTİREN fonksiyonlar için: iş bitince okuma önbelleğini
+    komple temizler, böylece ekranda asla eski bilgi kalmaz."""
+    import functools
+
+    @functools.wraps(fn)
+    def sarmal(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _onbellek_temizle()
+
+    return sarmal
+
+
 def _insert_id(c, sql, params):
     """Bir INSERT yapıp yeni satırın id'sini döndürür.
 
@@ -255,6 +315,7 @@ def _insert_id(c, sql, params):
     return c.lastrowid
 
 
+@_yazma
 def init_db():
     conn = get_conn()
     c = conn.cursor()
@@ -365,6 +426,7 @@ def _hash_password(password, salt=None):
     return salt, digest
 
 
+@_yazma
 def create_student(username, display_name, password):
     username = (username or "").strip().lower().replace(" ", "_")
     display_name = (display_name or "").strip()
@@ -398,6 +460,7 @@ def create_student(username, display_name, password):
     return True, "Hesap oluşturuldu."
 
 
+@_yazma
 def ensure_default_admin(username, display_name, password):
     """Admins tablosu boşsa, config.py'deki başlangıç bilgileriyle ilk yönetici
     hesabını oluşturur. Var olan bir yönetici hesabına ASLA dokunmaz -- yani
@@ -431,6 +494,7 @@ def verify_admin(username, password):
     return None
 
 
+@_yazma
 def change_admin_password(username, current_password, new_password):
     """Yöneticinin kendi şifresini değiştirmesi için -- mevcut şifreyi doğrular."""
     admin = verify_admin(username, current_password)
@@ -449,6 +513,7 @@ def change_admin_password(username, current_password, new_password):
     return True, "Şifre güncellendi."
 
 
+@_yazma
 def rename_student(old_username, new_username):
     """Bir öğrencinin kullanıcı adını değiştirir (görünen ad aynı kalır).
     Sonuç geçmişi de (results.student_name) otomatik olarak yeni ada taşınır."""
@@ -473,6 +538,7 @@ def rename_student(old_username, new_username):
     return True, "Kullanıcı adı güncellendi."
 
 
+@_yazma
 def change_admin_username(current_username, current_password, new_username):
     """Yöneticinin kullanıcı adını değiştirir -- mevcut şifreyle doğrular."""
     admin = verify_admin(current_username, current_password)
@@ -495,6 +561,7 @@ def change_admin_username(current_username, current_password, new_username):
     return True, "Kullanıcı adı güncellendi."
 
 
+@_onbellekli
 def get_students():
     """Kayıtlı tüm öğrencileri (kullanıcı adı + görünen ad) döner -- admin panelinde listelemek için."""
     conn = get_conn()
@@ -505,6 +572,7 @@ def get_students():
     return [dict(r) for r in rows]
 
 
+@_yazma
 def delete_student(username, sonuclari_da_sil=True):
     """Bir ogrenci kaydini siler.
 
@@ -534,6 +602,7 @@ def delete_student(username, sonuclari_da_sil=True):
     return True, "Öğrenci silindi; sınav sonuçları veritabanında bırakıldı."
 
 
+@_onbellekli
 def genel_istatistikler():
     """Ana sayfadaki sayaclar icin ozet bilgi uretir.
 
@@ -578,6 +647,7 @@ def genel_istatistikler():
     }
 
 
+@_yazma
 def reset_student_password(username, new_password):
     """Admin tarafından bir öğrencinin şifresini sıfırlar (öğrenci unutursa)."""
     username = (username or "").strip().lower().replace(" ", "_")
@@ -622,6 +692,7 @@ def verify_student(username, password):
 
 # ---------- categories ----------
 
+@_onbellekli
 def get_categories():
     conn = get_conn()
     # NOT: Eskiden "ORDER BY rowid" kullanılıyordu; "rowid" SQLite'a özel bir
@@ -636,6 +707,7 @@ def get_categories():
     return hazir + digerleri
 
 
+@_yazma
 def add_category(name):
     if not name:
         return
@@ -647,6 +719,7 @@ def add_category(name):
 
 # ---------- exams ----------
 
+@_yazma
 def add_exam(title, category, pdf_path, structure, answer_key, source="manuel", pdf_path_original=None):
     conn = get_conn()
     c = conn.cursor()
@@ -679,6 +752,7 @@ def exam_exists(title, category):
     return row is not None
 
 
+@_onbellekli
 def get_exams(category=None):
     conn = get_conn()
     if category:
@@ -697,6 +771,7 @@ def get_exams(category=None):
     return exams
 
 
+@_onbellekli
 def get_exam(exam_id):
     conn = get_conn()
     row = conn.execute("SELECT * FROM exams WHERE id = ?", (exam_id,)).fetchone()
@@ -709,6 +784,7 @@ def get_exam(exam_id):
     return d
 
 
+@_yazma
 def delete_exam(exam_id):
     """Sınavı veritabanından siler VE diskte kalan PDF dosyalarını da
     temizler (silmezsek dosyalar sunucuda gereksiz yer kaplamaya devam eder)."""
@@ -731,6 +807,7 @@ def delete_exam(exam_id):
 
 # ---------- results ----------
 
+@_onbellekli
 def get_setting(key, default=None):
     conn = get_conn()
     row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
@@ -738,6 +815,7 @@ def get_setting(key, default=None):
     return row["value"] if row else default
 
 
+@_yazma
 def set_setting(key, value):
     conn = get_conn()
     conn.execute(
@@ -749,6 +827,7 @@ def set_setting(key, value):
     conn.close()
 
 
+@_yazma
 def add_result(exam_id, student_name, per_subject, total_net, weighted_score,
                answers_detail=None, attempt_no=0, mode="tam"):
     """Her çağrı YENİ bir satır ekler (üzerine yazmaz) -- böylece aynı öğrenci
@@ -779,6 +858,7 @@ def add_result(exam_id, student_name, per_subject, total_net, weighted_score,
     return result_id
 
 
+@_yazma
 def delete_result(result_id):
     """Bir sonuç kaydını siler. SADECE admin panelinden çağrılmalı --
     öğrenci arayüzünde bu işlev için hiçbir düğme yoktur."""
@@ -788,6 +868,7 @@ def delete_result(result_id):
     conn.close()
 
 
+@_onbellekli
 def get_result_for_attempt(exam_id, student_name, attempt_no):
     """Belirli bir deneme + öğrenci + deneme-numarası için tamamlanmış
     (puanlanmış) bir sonuç var mı diye bakar. Varsa döndürür, yoksa None."""
@@ -811,6 +892,7 @@ def get_result_for_attempt(exam_id, student_name, attempt_no):
     return d
 
 
+@_onbellekli
 def get_current_attempt_no(exam_id, student_name):
     """Bir öğrenci bir denemeyi ilk kez mi açıyor, yoksa daha önce (bu
     tarayıcı oturumu kapansa/İnternet kesilse bile) kaldığı/bıraktığı bir
@@ -834,6 +916,7 @@ def get_current_attempt_no(exam_id, student_name):
     return max(m1, m2)
 
 
+@_yazma
 def save_progress(exam_id, student_name, attempt_no, answers):
     """Öğrencinin o ana kadar işaretlediği cevapları kaydeder (üzerine
     yazarak); sayfa yenilense/internet kesilse bile 'kaldığı yerden'
@@ -866,6 +949,7 @@ def load_progress(exam_id, student_name, attempt_no):
     return json.loads(row["answers_json"]) if row else None
 
 
+@_yazma
 def clear_progress(exam_id, student_name, attempt_no):
     """Sınav bitirilip puanlandığında, artık gereksiz kalan 'yarım kalmış
     cevaplar' kaydını siler."""
@@ -880,6 +964,7 @@ def clear_progress(exam_id, student_name, attempt_no):
     conn.close()
 
 
+@_onbellekli
 def get_results(student_name=None, exam_id=None):
     conn = get_conn()
     query = """SELECT results.*, exams.title AS exam_title, exams.category AS category
@@ -904,6 +989,7 @@ def get_results(student_name=None, exam_id=None):
     return out
 
 
+@_yazma
 def clear_results_for_exam(exam_id, student_name=None):
     """'Testi Sıfırla' -- bir denemenin gecmis sonuclarini siler ki ogrenci sifirdan cozebilsin."""
     conn = get_conn()
