@@ -58,6 +58,13 @@ KNOWN_LGS_PDFS = {
         "Sözel": "https://cdn.eba.gov.tr/icerik/lgs/2022_sozel_bolum_a_kitapcigi_ve_cevap_anahtari.pdf",
         "Sayısal": "https://cdn.eba.gov.tr/icerik/lgs/2022_sayisal_bolum_a_kitapcigi_ve_cevap_anahtari.pdf",
     },
+    # 2021: MEB'in kendi haber sayfasindan alindi (liste sayfasinda 2021 yoktu,
+    # bu yuzden "2018-2025" secildiginde sadece o yil atlanip ekranda hata
+    # veriyordu). Kaynak: meb.gov.tr 06/06/2021 tarihli duyuru.
+    2021: {
+        "Sözel": "https://cdn.eba.gov.tr/icerik/lgs/2021_SOZEL_BOLUM_A_.pdf",
+        "Sayısal": "https://cdn.eba.gov.tr/icerik/lgs/2021_SAYISAL_BOLUM_A_.pdf",
+    },
     2020: {
         "Sözel": "https://www.meb.gov.tr/meb_iys_dosyalar/2020_06/21195531_2020_sozel_bolum_a.pdf",
         "Sayısal": "https://www.meb.gov.tr/meb_iys_dosyalar/2020_06/21195513_2020_sayisal_bolum_a.pdf",
@@ -128,6 +135,86 @@ def scrape_source_page(page_url=LGS_SOURCE_PAGE):
 def available_years():
     """Adresi kesin olarak elimizde olan yillar (menude gostermek icin)."""
     return sorted(KNOWN_LGS_PDFS.keys(), reverse=True)
+
+
+# ------------------------------------------------------------------ BURSLULUK
+# MEB'in "Bursluluk Sinavi Cikmis Sorular" sayfasi: her yil icin bir baslik
+# ("2016 yili bursluluk sinav kitapciklari ve cevap anahtari") ve altinda
+# sinif sinif baglantilar ("5. Sinif icin Tiklayiniz") bulunur.
+BURSLULUK_SOURCE_PAGE = (
+    "https://745183.meb.k12.tr/icerikler/bursluluksinavicikmissorular20162025_16928996.html"
+)
+
+# İOKBS'de her sinifta 4 ders x 25 soru = 100 soru vardir. 8. sinifta
+# "Sosyal Bilgiler" yerine "T.C. Inkilap Tarihi ve Ataturkculuk" sorulur.
+IOKBS_YAPISI = {
+    5: [("Türkçe", 25), ("Matematik", 25), ("Fen Bilimleri", 25), ("Sosyal Bilgiler", 25)],
+    6: [("Türkçe", 25), ("Matematik", 25), ("Fen Bilimleri", 25), ("Sosyal Bilgiler", 25)],
+    7: [("Türkçe", 25), ("Matematik", 25), ("Fen Bilimleri", 25), ("Sosyal Bilgiler", 25)],
+    8: [("Türkçe", 25), ("Matematik", 25), ("Fen Bilimleri", 25), ("İnkılap", 25)],
+}
+
+
+def scrape_bursluluk(page_url=BURSLULUK_SOURCE_PAGE):
+    """Bursluluk sayfasindaki baglantilari {(yil, sinif): url} olarak dondurur.
+
+    YONTEM: Sayfa "2016 yili ... kitapciklari", ardindan "5. Sinif icin
+    Tiklayiniz", "6. Sinif icin Tiklayiniz" ... seklinde ilerliyor. Yani bir
+    baglantinin HANGI YILA ait oldugu, kendisinden ONCE gelen en son yil
+    basligindan anlasiliyor. Bu yuzden sayfa bastan sona SIRAYLA taraniyor:
+    yil basliklari ve baglantilar hangi sirayla geliyorsa o sirayla islenir.
+
+    Hata olursa bos sozluk doner (asla istisna firlatmaz)."""
+    try:
+        resp = requests.get(page_url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+        if resp.status_code != 200:
+            return {}
+        resp.encoding = resp.apparent_encoding or resp.encoding
+        html = resp.text
+    except requests.exceptions.RequestException:
+        return {}
+
+    taban = re.match(r"^(https?://[^/]+)", page_url)
+    taban = taban.group(1) if taban else ""
+    dizin = page_url.rsplit("/", 1)[0]
+
+    def _tam_url(u):
+        u = (u or "").strip()
+        if u.startswith("//"):
+            return "https:" + u
+        if u.startswith("/"):
+            return taban + u
+        if u.startswith("http"):
+            return u
+        return dizin + "/" + u
+
+    # Yil basliklari ve baglantilari BELGE SIRASINDA birlikte tara
+    desen = re.compile(
+        r'(?P<link><a[^>]+href=["\'](?P<href>[^"\']+)["\'][^>]*>(?P<metin>.*?)</a>)'
+        r"|(?P<yil>20[0-9]{2})\s*y[ıi]l[ıi]",
+        re.IGNORECASE | re.DOTALL,
+    )
+    bulunan = {}
+    aktif_yil = None
+    for m in desen.finditer(html):
+        if m.group("yil"):
+            aktif_yil = int(m.group("yil"))
+            continue
+        if aktif_yil is None:
+            continue
+        metin = re.sub(r"<[^>]+>", " ", m.group("metin") or "")
+        metin = re.sub(r"\s+", " ", metin).strip()
+        sm = re.search(r"([5-9]|1[0-2])\s*\.?\s*s[ıi]n[ıi]f", _normalize(metin))
+        if not sm:
+            continue
+        sinif = int(sm.group(1))
+        bulunan.setdefault((aktif_yil, sinif), _tam_url(m.group("href")))
+    return bulunan
+
+
+def bursluluk_indir(url, dest_path):
+    """Bursluluk kitapciklarindan birini indirir (PDF oldugu dogrulanir)."""
+    return _download(url, dest_path)
 
 
 def _download(url, dest_path):

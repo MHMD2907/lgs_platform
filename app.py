@@ -544,7 +544,73 @@ if not st.session_state.student_name and not st.session_state.is_admin:
         """,
         unsafe_allow_html=True,
     )
-    c1, c2, c3 = st.columns([1, 2, 1])
+    # ---- Sayaçlar: sistemde ne var, ne kadarı çözülmüş ----
+    _ist = db.genel_istatistikler()
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("📚 Toplam Deneme/Test", _ist["toplam_deneme"])
+    m2.metric("❓ Toplam Soru", _ist["toplam_soru"])
+    m3.metric("✅ Çözülen Sınav", _ist["toplam_sonuc"])
+    m4.metric("👨‍🎓 Kayıtlı Öğrenci", _ist["ogrenci_sayisi"])
+
+    if _ist["kategoriler"]:
+        st.markdown("##### 📂 Bölümler ve içerikleri")
+        _kat_df = pd.DataFrame(
+            [
+                {
+                    "Bölüm": k,
+                    "Deneme/Test Sayısı": v["deneme"],
+                    "Toplam Soru": v["soru"],
+                    "Çözülen": v["cozulen"],
+                }
+                for k, v in _ist["kategoriler"].items()
+            ]
+        )
+        st.dataframe(_kat_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        st.markdown(
+            """
+### 📖 Bu program nedir?
+
+Bu platform, **8. sınıf LGS** ve **bursluluk (İOKBS)** sınavlarına hazırlanan bir öğrencinin
+geçmiş yıl sorularını ve soru bankası testlerini **tablet veya bilgisayardan çözüp**
+sonucunu anında görebilmesi için hazırlandı. Kâğıt çıktı almaya, cevap anahtarını
+elle kontrol etmeye gerek yok.
+
+**Sınav çözerken**
+
+- Kitapçık ekranın solunda **sayfa sayfa** açılır; sağında optik form durur. İkisi yan yana,
+  aynı ekranda — dışarıda başka bir program açmaya gerek yok.
+- "Önceki / Sonraki" düğmeleri hem üstte hem altta; doğrudan sayfa numarası da yazılabilir.
+- İşaretlenen her cevap **anında kaydedilir**. İnternet kesilse, tablet kapansa bile
+  tekrar girildiğinde **kaldığı yerden** devam edilir.
+- Üstteki sayaç kaç soru işaretlendiğini gösterir (*"12 / 20 soru işaretlendi"*).
+- Boş sayfalar kitapçıktan otomatik atılır; cevap anahtarı sayfaları öğrenciye **gösterilmez**.
+
+**Sınav bittikten sonra**
+
+- Ders ders **doğru / yanlış / boş** sayısı ve net hesabı (3 yanlış 1 doğruyu götürür).
+- Hangi soruyu yanlış yaptığı, **ne işaretlediği ve doğrusunun ne olduğu** tek tek listelenir.
+- Gelişim grafiği ile netlerin zamanla nasıl değiştiği görülür.
+- Aynı deneme istenildiği kadar tekrar çözülebilir; **her denemenin kaydı ayrı ayrı** saklanır.
+
+**Yönetici (veli) tarafında**
+
+- Geçmiş yıl LGS kitapçıkları **tek tuşla, resmi MEB arşivinden** indirilir (2018-2025).
+- Bir soru bankası PDF'i yüklenince kitap taranır, **her test ayrı ayrı** sisteme eklenir.
+- Kendi PDF'lerinizi de yükleyebilir, cevap anahtarını otomatik okutabilirsiniz.
+- Öğrenci ekleme/silme, şifre sıfırlama, sonuç silme ve tüm raporlar buradadır.
+- Cevap anahtarlı **orijinal kitapçığı sadece yönetici** görebilir.
+
+**Güvenlik ve gizlilik**
+
+- Şifre girilmeden hiçbir teste ulaşılamaz.
+- Cevap anahtarlı dosyalar, adresi tahmin edilerek açılamayacak korumalı bir klasörde tutulur.
+- 1 saat işlem yapılmazsa oturum kendiliğinden kapanır; ilerleme kaybolmaz.
+            """
+        )
     with c2:
         st.info(
             "👈 Başlamak için **soldaki menüden giriş yapın.**\n\n"
@@ -555,9 +621,14 @@ if not st.session_state.student_name and not st.session_state.is_admin:
             """
             | | |
             |---|---|
-            | 📝 | Deneme çöz, cevapların **otomatik kaydedilsin** |
-            | ⏸️ | Yarıda kalırsan **kaldığın yerden devam et** |
-            | 📊 | Netlerini ve **gelişim grafiğini** gör |
+            | 📝 | Cevaplar **otomatik kaydedilir** |
+            | ⏸️ | **Kaldığın yerden** devam edebilirsin |
+            | 📄 | PDF ve optik form **yan yana** |
+            | 🔢 | **Soru sayacı** ile takip |
+            | 📊 | Net, doğru/yanlış **dökümü** |
+            | 📈 | **Gelişim grafiği** |
+            | 🔁 | Aynı testi **tekrar tekrar** çöz |
+            | 🔒 | Cevap anahtarı **öğrenciye kapalı** |
             """
         )
     st.stop()
@@ -571,6 +642,35 @@ tabs = st.tabs(tab_names)
 # ================================================================= TAB: SINAV ÇÖZ
 with tabs[0]:
     st.markdown("### 📱 Sınav Çöz")
+
+    # ---- Sayaçlar: sistemde ne var, öğrenci ne kadarını çözmüş ----
+    _ist = db.genel_istatistikler()
+    _benim = (
+        len(db.get_results(student_name=st.session_state.student_name))
+        if st.session_state.student_name else 0
+    )
+    _s1, _s2, _s3, _s4 = st.columns(4)
+    _s1.metric("📚 Toplam Deneme/Test", _ist["toplam_deneme"])
+    _s2.metric("❓ Toplam Soru", _ist["toplam_soru"])
+    _s3.metric("✅ Senin Çözdüğün", _benim)
+    _s4.metric("📈 Tüm Çözülenler", _ist["toplam_sonuc"])
+    with st.expander("📂 Bölüm bölüm dağılım"):
+        if _ist["kategoriler"]:
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Bölüm": k,
+                        "Deneme/Test": v["deneme"],
+                        "Toplam Soru": v["soru"],
+                        "Çözülme Sayısı": v["cozulen"],
+                    }
+                    for k, v in _ist["kategoriler"].items()
+                ]),
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.caption("Henüz hiç deneme eklenmemiş.")
+
     st.caption("Aşağıdan bir kategori ve deneme seçerek başlayın.")
     # ÖNEMLİ - "GİRİŞ YAPINCA HER ŞEY SIFIRLANIYOR" HATASININ KÖK NEDENİ:
     # Streamlit, bir çalışma turunda EKRANA ÇİZİLMEYEN kutuların hafızasını
@@ -900,10 +1000,11 @@ if st.session_state.is_admin:
                 "📚 Soru Bankasını Test Test Ayır",
                 "Diğer Kategori / Soru Bankası Ekle (Manuel)",
                 "Otomatik İndirme (Resmi EBA Arşivi)",
+                "🎓 Bursluluk (İOKBS) Otomatik İndir",
                 "URL'den PDF İndir",
                 "Google Drive'dan İçe Aktar",
                 "Kayıtlı Denemeler",
-                "Öğrenci Şifrelerini Yönet",
+                "Öğrenci Hesapları (Ekle/Sil/Şifre)",
                 "Öğrenci Raporları",
                 "Hesap Ayarları",
             ],
@@ -1232,6 +1333,118 @@ if st.session_state.is_admin:
                     st.session_state["_admin_flash"] = ("success", f"'{title}' {gcat} kategorisine eklendi." + note)
                     st.rerun()
 
+        # ---------------- Bursluluk (İOKBS) otomatik indirme ----------------
+        elif admin_section == "🎓 Bursluluk (İOKBS) Otomatik İndir":
+            st.markdown(
+                "MEB'in **bursluluk (İOKBS) çıkmış sorular** sayfasını tarayıp, seçtiğiniz "
+                "yıl ve sınıfların kitapçıklarını otomatik indirir. İOKBS'de her sınıfta "
+                "**4 ders × 25 soru = 100 soru** vardır (8. sınıfta Sosyal Bilgiler yerine "
+                "T.C. İnkılap Tarihi sorulur)."
+            )
+            _bl_key = "_bursluluk_liste"
+            if st.button("🔎 Sayfayı Tara ve Kitapçıkları Bul", type="primary"):
+                with st.spinner("MEB sayfası taranıyor..."):
+                    _bulunan = bot.scrape_bursluluk()
+                st.session_state[_bl_key] = {f"{y}|{s}": u for (y, s), u in _bulunan.items()}
+                st.rerun()
+
+            _liste = st.session_state.get(_bl_key)
+            if _liste is not None and not _liste:
+                st.error(
+                    "Sayfaya ulaşılamadı ya da hiç kitapçık bağlantısı bulunamadı. "
+                    "İnternet bağlantınızı kontrol edip tekrar deneyin."
+                )
+            elif _liste:
+                _cozulmus = sorted(
+                    (int(k.split("|")[0]), int(k.split("|")[1])) for k in _liste
+                )
+                _yillar = sorted({y for y, _ in _cozulmus}, reverse=True)
+                _siniflar = sorted({s for _, s in _cozulmus})
+                st.success(
+                    f"**{len(_cozulmus)} kitapçık** bulundu — "
+                    f"{min(_yillar)}-{max(_yillar)} yılları, {_siniflar} sınıflar."
+                )
+                _bc1, _bc2 = st.columns(2)
+                _sec_yil = _bc1.multiselect("Yıllar", _yillar, default=_yillar, key="bl_yil")
+                _sec_sinif = _bc2.multiselect(
+                    "Sınıflar", _siniflar,
+                    default=[s for s in _siniflar if s in bot.IOKBS_YAPISI],
+                    format_func=lambda s: f"{s}. Sınıf", key="bl_sinif",
+                )
+                _hedefler = [
+                    (y, s) for (y, s) in _cozulmus if y in _sec_yil and s in _sec_sinif
+                ]
+                _desteklenmeyen = sorted({s for _, s in _hedefler if s not in bot.IOKBS_YAPISI})
+                if _desteklenmeyen:
+                    st.warning(
+                        f"{_desteklenmeyen} sınıf(lar)ı için soru dağılımı tanımlı değil "
+                        "(bu sayfada lise sınıfları da olabilir). Bunlar indirilir ama "
+                        "otomatik puanlama kurulamaz."
+                    )
+                st.caption(f"**{len(_hedefler)} kitapçık** seçili. Zaten eklenmiş olanlar atlanır.")
+
+                if st.button("⬇️ Seçilenleri İndir ve Ekle", type="primary", disabled=not _hedefler):
+                    _kategori = "İOKBS (Bursluluk)"
+                    db.add_category(_kategori)
+                    _bl_flash, _ekl, _atl = [], 0, 0
+                    # Tek bir ilerleme çubuğu kullanılıyor; her adımda yeni
+                    # öğe yaratmak arayüz hatasına yol açıyordu (bkz. EBA bölümü).
+                    _bar = st.progress(0.0, text="Başlıyor...")
+                    for _i, (_y, _s) in enumerate(_hedefler, start=1):
+                        _oran = _i / len(_hedefler)
+                        _baslik = f"{_y} Bursluluk (İOKBS) - {_s}. Sınıf"
+                        if db.exam_exists(_baslik, _kategori):
+                            _atl += 1
+                            _bar.progress(_oran, text=f"{_baslik}: zaten vardı")
+                            continue
+                        _bar.progress(_oran, text=f"{_baslik} indiriliyor... ({_i}/{len(_hedefler)})")
+                        _ham = os.path.join(PDF_DIR, f"_iokbs_{_y}_{_s}.pdf")
+                        _ok, _msg = bot.bursluluk_indir(_liste[f"{_y}|{_s}"], _ham)
+                        if not _ok:
+                            _bl_flash.append(("error", f"❌ {_baslik}: indirilemedi ({_msg})."))
+                            continue
+                        _yapi_satir = bot.IOKBS_YAPISI.get(_s)
+                        if not _yapi_satir:
+                            _bl_flash.append((
+                                "error",
+                                f"⚠️ {_baslik}: indirildi ama bu sınıf için soru dağılımı "
+                                f"tanımlı değil. Dosya kaydedildi, 'Diğer Kategori' bölümünden "
+                                f"elle ekleyebilirsiniz.",
+                            ))
+                            continue
+                        _bar.progress(_oran, text=f"{_baslik}: cevap anahtarı okunuyor...")
+                        _key, _kmsg, _kidx = parsing.extract_answer_key(_ham, _yapi_satir)
+                        if _key is None:
+                            _bl_flash.append((
+                                "error",
+                                f"⚠️ {_baslik}: indirildi ama cevap anahtarı otomatik "
+                                f"okunamadı ({_kmsg}). Dosya kaydedildi; 'Diğer Kategori / "
+                                f"Soru Bankası Ekle (Manuel)' bölümünden yükleyip cevapları "
+                                f"elle girebilirsiniz.",
+                            ))
+                            continue
+                        _guvenli = os.path.join(PDF_DIR, f"iokbs_{_y}_{_s}_guvenli.pdf")
+                        _bar.progress(_oran, text=f"{_baslik}: PDF hazırlanıyor...")
+                        parsing.crop_and_merge([(_ham, _kidx)], _guvenli)
+                        _orij = os.path.join(PRIVATE_DIR, f"iokbs_{_y}_{_s}_orijinal.pdf")
+                        parsing.merge_full([_ham], _orij)
+                        db.add_exam(
+                            _baslik, _kategori, _guvenli,
+                            build_generic_structure(_yapi_satir),
+                            {"Genel": _key}, source="otomatik-iokbs",
+                            pdf_path_original=_orij,
+                        )
+                        _ekl += 1
+                        _bl_flash.append(("success", f"✅ {_baslik}: eklendi." + _compression_note(_guvenli)))
+                    _bar.empty()
+                    _bl_flash.insert(0, (
+                        "success",
+                        f"Bitti: **{_ekl} kitapçık eklendi**"
+                        + (f", {_atl} tanesi zaten vardı." if _atl else "."),
+                    ))
+                    st.session_state["_admin_flash"] = _bl_flash
+                    st.rerun()
+
         # ---------------- Otomatik indirme (EBA) ----------------
         elif admin_section == "Otomatik İndirme (Resmi EBA Arşivi)":
             _ready = bot.available_years()
@@ -1400,10 +1613,10 @@ if st.session_state.is_admin:
                 st.divider()
 
         # ---------------- Öğrenci şifrelerini yönet ----------------
-        elif admin_section == "Öğrenci Şifrelerini Yönet":
+        elif admin_section == "Öğrenci Hesapları (Ekle/Sil/Şifre)":
             st.markdown(
-                "Bir öğrenci şifresini unutursa, burada onun için yeni bir şifre "
-                "belirleyebilirsiniz. Öğrenciye sadece yeni şifreyi söylemeniz yeterli."
+                "Öğrenci hesaplarını buradan yönetirsiniz: **kullanıcı adını değiştirme**, "
+                "**şifre sıfırlama** ve **öğrenciyi silme**."
             )
             students = db.get_students()
             if not students:
@@ -1440,6 +1653,46 @@ if st.session_state.is_admin:
                                     st.success(f"{s['display_name']} için şifre güncellendi.")
                                 else:
                                     st.error(msg)
+
+                        st.divider()
+                        st.markdown("**🗑️ Öğrenciyi sil**")
+                        _sonuc_sayisi = len(db.get_results(student_name=s["username"]))
+                        st.caption(
+                            f"Bu öğrencinin **{_sonuc_sayisi}** kayıtlı sınav sonucu var. "
+                            "Silme işlemi geri alınamaz."
+                        )
+                        _sonuc_da = st.checkbox(
+                            "Sınav sonuçları da silinsin",
+                            value=True,
+                            key=f"delres_{s['username']}",
+                            help="İşareti kaldırırsanız hesap silinir ama geçmiş sonuçlar veritabanında kalır.",
+                        )
+                        # İki adımlı onay: yanlışlıkla tek tıkla silinmesin.
+                        _onay_key = f"confirm_del_{s['username']}"
+                        if not st.session_state.get(_onay_key):
+                            if st.button("Öğrenciyi Sil", key=f"delbtn_{s['username']}"):
+                                st.session_state[_onay_key] = True
+                                st.rerun()
+                        else:
+                            st.warning(
+                                f"**{s['display_name']}** adlı öğrenciyi silmek üzeresiniz. Emin misiniz?"
+                            )
+                            _d1, _d2 = st.columns(2)
+                            if _d1.button("✅ Evet, sil", key=f"delyes_{s['username']}", type="primary"):
+                                ok, msg = db.delete_student(s["username"], sonuclari_da_sil=_sonuc_da)
+                                st.session_state.pop(_onay_key, None)
+                                # Silinen öğrenci o an "öğrenci olarak devam et"
+                                # modunda seçiliyse oturumdan da düşür.
+                                if ok and st.session_state.student_name == s["username"]:
+                                    st.session_state.student_name = ""
+                                    st.session_state.student_display_name = ""
+                                st.session_state["_admin_flash"] = (
+                                    ("success", f"✅ {msg}") if ok else ("error", msg)
+                                )
+                                st.rerun()
+                            if _d2.button("Vazgeç", key=f"delno_{s['username']}"):
+                                st.session_state.pop(_onay_key, None)
+                                st.rerun()
 
         # ---------------- Öğrenci raporları ----------------
         elif admin_section == "Öğrenci Raporları":

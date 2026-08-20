@@ -271,6 +271,79 @@ def get_students():
     return [dict(r) for r in rows]
 
 
+def delete_student(username, sonuclari_da_sil=True):
+    """Bir ogrenci kaydini siler.
+
+    sonuclari_da_sil=True ise o ogrencinin cozdugu sinav sonuclari ve yarim
+    kalmis ilerlemesi de silinir. False ise sonuclar veritabaninda kalir
+    (hesap gider ama gecmis raporlar korunur)."""
+    username = (username or "").strip().lower().replace(" ", "_")
+    if not username:
+        return False, "Kullanıcı adı boş olamaz."
+    conn = get_conn()
+    exists = conn.execute("SELECT 1 FROM students WHERE username = ?", (username,)).fetchone()
+    if not exists:
+        conn.close()
+        return False, "Bu kullanıcı adında bir öğrenci bulunamadı."
+    silinen = 0
+    if sonuclari_da_sil:
+        silinen = conn.execute(
+            "SELECT COUNT(*) AS n FROM results WHERE student_name = ?", (username,)
+        ).fetchone()["n"]
+        conn.execute("DELETE FROM results WHERE student_name = ?", (username,))
+        conn.execute("DELETE FROM in_progress WHERE student_name = ?", (username,))
+    conn.execute("DELETE FROM students WHERE username = ?", (username,))
+    conn.commit()
+    conn.close()
+    if sonuclari_da_sil:
+        return True, f"Öğrenci silindi ({silinen} sınav sonucu da silindi)."
+    return True, "Öğrenci silindi; sınav sonuçları veritabanında bırakıldı."
+
+
+def genel_istatistikler():
+    """Ana sayfadaki sayaclar icin ozet bilgi uretir.
+
+    Donus: {"toplam_deneme","toplam_soru","toplam_sonuc","ogrenci_sayisi",
+            "kategoriler": {kategori: {"deneme","soru","cozulen"}}}"""
+    conn = get_conn()
+    exams = conn.execute("SELECT id, category, structure FROM exams").fetchall()
+    sonuc_sayilari = {
+        r["exam_id"]: r["n"]
+        for r in conn.execute(
+            "SELECT exam_id, COUNT(*) AS n FROM results GROUP BY exam_id"
+        ).fetchall()
+    }
+    toplam_sonuc = conn.execute("SELECT COUNT(*) AS n FROM results").fetchone()["n"]
+    ogrenci_sayisi = conn.execute("SELECT COUNT(*) AS n FROM students").fetchone()["n"]
+    conn.close()
+
+    kategoriler = {}
+    toplam_soru = 0
+    for e in exams:
+        try:
+            yapi = json.loads(e["structure"])
+        except (TypeError, ValueError):
+            yapi = {}
+        soru = sum(
+            (meta or {}).get("count", 0)
+            for bolum in yapi.values()
+            for meta in bolum.values()
+        )
+        toplam_soru += soru
+        k = kategoriler.setdefault(e["category"], {"deneme": 0, "soru": 0, "cozulen": 0})
+        k["deneme"] += 1
+        k["soru"] += soru
+        k["cozulen"] += sonuc_sayilari.get(e["id"], 0)
+
+    return {
+        "toplam_deneme": len(exams),
+        "toplam_soru": toplam_soru,
+        "toplam_sonuc": toplam_sonuc,
+        "ogrenci_sayisi": ogrenci_sayisi,
+        "kategoriler": dict(sorted(kategoriler.items())),
+    }
+
+
 def reset_student_password(username, new_password):
     """Admin tarafından bir öğrencinin şifresini sıfırlar (öğrenci unutursa)."""
     username = (username or "").strip().lower().replace(" ", "_")

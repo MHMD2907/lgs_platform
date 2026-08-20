@@ -32,5 +32,5 @@ except Exception:
 # değişiklik veritabanında saklanır, bu dosyadaki değeri etkilemez.
 ADMIN_USERNAME = st.secrets.get("ADMIN_USERNAME", "admin")
 
-APP_TITLE = "LGS Eğitim Platformu"
+APP_TITLE = "M.ONUR LGS Eğitim Platformu"
 PDF_DIR_NAME = "pdfs"
