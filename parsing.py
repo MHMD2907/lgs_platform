@@ -197,24 +197,58 @@ def parse_answer_page(page, subjects):
 
 
 def extract_answer_key(pdf_file_or_path, section_subjects, search_last_n_pages=2):
-    """Verilen PDF'in son sayfalarindan birinde cevap anahtarini arar
-    (bazi kitapciklarda son sayfa bos/kapak olabilir).
+    """Verilen PDF'te cevap anahtarini arar.
+
+    ONEMLI - IKI ASAMALI ARAMA: Once ESKI kati okuyucu denenir (son
+    sayfada, her ders bir sutun). O tutmazsa, duzenden bagimsiz calisan
+    ESNEK okuyucu devreye girer (bkz. cevap_anahtari_bul). Bursluluk
+    (IOKBS) kitapciklari eski okuyucuya uymadigi icin hicbiri
+    eklenemiyordu; artik ikisi birlikte deneniyor.
 
     section_subjects: [("Türkçe", 20), ...] siralı liste.
     Donus: (answers_dict veya None, mesaj, cevap_anahtari_sayfa_indeksi veya None)
     """
-    with pdfplumber.open(pdf_file_or_path) as pdf:
-        n = len(pdf.pages)
-        last_error = "PDF'te sayfa bulunamadı."
-        for offset in range(search_last_n_pages):
-            idx = n - 1 - offset
-            if idx < 0:
-                break
-            result, msg = parse_answer_page(pdf.pages[idx], section_subjects)
-            if result is not None:
-                return result, "OK", idx
-            last_error = msg
-        return None, last_error, None
+    son_hata = "PDF'te sayfa bulunamadı."
+    try:
+        with pdfplumber.open(pdf_file_or_path) as pdf:
+            n = len(pdf.pages)
+            for offset in range(search_last_n_pages):
+                idx = n - 1 - offset
+                if idx < 0:
+                    break
+                result, msg = parse_answer_page(pdf.pages[idx], section_subjects)
+                if result is not None:
+                    return result, "OK", idx
+                son_hata = msg
+    except Exception as e:
+        son_hata = f"PDF okunamadı: {e}"
+
+    # --- Esnek okuyucu: dosya nesnesi verilmisse gecici dosyaya yaz ---
+    yol = pdf_file_or_path
+    gecici = None
+    if hasattr(pdf_file_or_path, "read"):
+        try:
+            pdf_file_or_path.seek(0)
+            gecici = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            gecici.write(pdf_file_or_path.read())
+            gecici.close()
+            yol = gecici.name
+            pdf_file_or_path.seek(0)
+        except Exception:
+            return None, son_hata, None
+    try:
+        sonuc, mesaj, idx = cevap_anahtari_bul(yol, section_subjects)
+        if sonuc is not None:
+            return sonuc, "OK", idx
+        return None, f"{son_hata} (Esnek okuma da denendi: {mesaj})", idx
+    except Exception as e:
+        return None, f"{son_hata} (Esnek okuma hatası: {e})", None
+    finally:
+        if gecici:
+            try:
+                os.unlink(gecici.name)
+            except Exception:
+                pass
 
 
 def crop_and_merge(file_specs, output_path):
@@ -314,3 +348,190 @@ def gorsel_kucult(yol, dpi=110, kalite=58, sinir=None):
     except Exception:
         pass
     return False
+
+
+# =====================================================================
+#  ESNEK CEVAP ANAHTARI OKUYUCU
+# =====================================================================
+# ONEMLI - NEDEN GEREKLI: Onceki okuyucu TEK bir duzeni taniyordu:
+# "son sayfada, her ders icin bir sutun". Bursluluk (IOKBS) kitapciklarinda
+# duzen farkli oldugu icin "4 ders sutunu bekleniyordu, 1 sutun bulundu"
+# diyip hicbir kitapcigi ekleyemiyordu.
+#
+# Bu okuyucu duzene degil, SAYILARA bakar:
+#   1. Cevap anahtari sayfalarini bulur (metninde "CEVAP ANAHTARI" gecen
+#      ya da bol miktarda "12. C" ikilisi bulunan sayfalar).
+#   2. Sayfadaki tum (soru_no, harf) ikililerini KOORDINATLARIYLA toplar.
+#   3. Sutun sutun mu satir satir mi dizildigini, elde edilen sayi dizisinin
+#      duzgunlugune bakarak kendi anlar.
+#   4. Ders bloklarini iki sekilde ayirir:
+#        a) numaralandirma her derste 1'den basliyorsa -> her 1'de yeni blok
+#        b) 1'den toplam soru sayisina kadar kesintisiz gidiyorsa -> ders
+#           soru sayilarina gore sirayla boler
+# Boylece hem eski LGS kitapciklari hem bursluluk kitapciklari okunur.
+
+_IKILI = re.compile(r"^(\d{1,3})[\.\)]?$")
+
+
+def _sayfa_ikilileri(page):
+    """Sayfadaki (soru_no, harf) ikililerini koordinatlariyla dondurur."""
+    words = page.extract_words()
+    numtoks, lettoks = [], []
+    for w in words:
+        txt = (w["text"] or "").strip()
+        m = _IKILI.match(txt)
+        if m:
+            n = int(m.group(1))
+            if 1 <= n <= 200:
+                numtoks.append({"x0": w["x0"], "x1": w["x1"], "top": w["top"], "num": n})
+            continue
+        if re.fullmatch(r"[A-Da-d]", txt):
+            lettoks.append({"x0": w["x0"], "top": w["top"], "letter": txt.upper()})
+            continue
+        # "12.C" gibi bitisik yazimlar
+        m2 = re.fullmatch(r"(\d{1,3})[\.\)\-]\s*([A-Da-d])", txt)
+        if m2:
+            n = int(m2.group(1))
+            if 1 <= n <= 200:
+                numtoks.append({"x0": w["x0"], "x1": w["x1"], "top": w["top"], "num": n})
+                lettoks.append({"x0": w["x1"], "top": w["top"], "letter": m2.group(2).upper()})
+    ikililer = []
+    for nt in numtoks:
+        aday = [
+            lt for lt in lettoks
+            if abs(lt["top"] - nt["top"]) < 7 and -2 < (lt["x0"] - nt["x1"]) < 45
+        ]
+        if not aday:
+            continue
+        aday.sort(key=lambda lt: abs(lt["x0"] - nt["x1"]))
+        ikililer.append({"num": nt["num"], "harf": aday[0]["letter"],
+                         "x": nt["x0"], "top": nt["top"]})
+    return ikililer
+
+
+def _duzgunluk(diziler):
+    """Bir sayi dizisinin ne kadar 'duzgun sirali' oldugunu olcer."""
+    if not diziler:
+        return -1
+    artan = sum(1 for a, b in zip(diziler, diziler[1:]) if b == a + 1 or b == 1)
+    return artan / max(1, len(diziler) - 1)
+
+
+def _okuma_sirasi(ikililer):
+    """Ikilileri gorsel okuma sirasina dizer.
+
+    Sayfa hem SUTUN SUTUN (yukaridan asagi, sonra saga) hem de SATIR SATIR
+    (soldan saga, sonra asagi) dizilmis olabilir. Ikisini de deneyip sayi
+    dizisi hangisinde daha duzgun cikiyorsa onu kullaniyoruz."""
+    if not ikililer:
+        return []
+
+    # a) Sutun sutun
+    sutunlu = sorted(ikililer, key=lambda t: t["x"])
+    sutunlar, esik = [[sutunlu[0]]], 30
+    for t in sutunlu[1:]:
+        if t["x"] - sutunlar[-1][-1]["x"] > esik:
+            sutunlar.append([t])
+        else:
+            sutunlar[-1].append(t)
+    a_sira = [t for s in sutunlar for t in sorted(s, key=lambda z: z["top"])]
+
+    # b) Satir satir
+    b_sira = sorted(ikililer, key=lambda t: (round(t["top"] / 6), t["x"]))
+
+    return a_sira if _duzgunluk([t["num"] for t in a_sira]) >= \
+        _duzgunluk([t["num"] for t in b_sira]) else b_sira
+
+
+def _bloklara_ayir(sirali, subjects):
+    """Okuma sirasindaki ikilileri ders bloklarina ayirir."""
+    sayilar = [t["num"] for t in sirali]
+    harfler = [t["harf"] for t in sirali]
+    adetler = [c for _s, c in subjects]
+    toplam = sum(adetler)
+
+    # a) Her derste numaralandirma 1'den basliyor mu?
+    bloklar, su = [], []
+    for i, n in enumerate(sayilar):
+        if n == 1 and su:
+            bloklar.append(su)
+            su = []
+        su.append(i)
+    if su:
+        bloklar.append(su)
+    if len(bloklar) == len(subjects) and \
+            all(len(b) == c for b, c in zip(bloklar, adetler)):
+        return {s: [harfler[i] for i in b] for (s, _c), b in zip(subjects, bloklar)}
+
+    # b) 1'den toplam soru sayisina kadar kesintisiz mi?
+    if len(sayilar) == toplam and sayilar == list(range(1, toplam + 1)):
+        out, bas = {}, 0
+        for s, c in subjects:
+            out[s] = harfler[bas:bas + c]
+            bas += c
+        return out
+
+    # c) Sadece adet tutuyorsa sirayla bol (son care)
+    if len(harfler) == toplam:
+        out, bas = {}, 0
+        for s, c in subjects:
+            out[s] = harfler[bas:bas + c]
+            bas += c
+        return out
+    return None
+
+
+def cevap_anahtari_bul(pdf_yolu, subjects, tara=14):
+    """PDF'te cevap anahtarini esnek bicimde arar.
+
+    Donus: (cevaplar_dict veya None, mesaj, ilk_anahtar_sayfa_indeksi veya None)"""
+    import pypdfium2 as pdfium
+
+    adaylar = []
+    try:
+        doc = pdfium.PdfDocument(pdf_yolu)
+        try:
+            n = len(doc)
+            for i in range(max(0, n - tara), n):
+                tp = doc[i].get_textpage()
+                try:
+                    metin = (tp.get_text_range() or "").upper()
+                finally:
+                    tp.close()
+                sade = re.sub(r"[^A-Z]", "", metin.replace("İ", "I").replace("Ç", "C")
+                              .replace("Ş", "S").replace("Ğ", "G").replace("Ü", "U")
+                              .replace("Ö", "O"))
+                if "CEVAPANAHTARI" in sade or len(re.findall(r"\d{1,3}\s*[\.\)]\s*[A-D]\b", metin)) >= 15:
+                    adaylar.append(i)
+        finally:
+            doc.close()
+    except Exception:
+        adaylar = []
+    if not adaylar:
+        try:
+            with pdfplumber.open(pdf_yolu) as pdf:
+                n = len(pdf.pages)
+            adaylar = list(range(max(0, n - 4), n))
+        except Exception:
+            return None, "PDF açılamadı.", None
+
+    toplam_soru = sum(c for _s, c in subjects)
+    with pdfplumber.open(pdf_yolu) as pdf:
+        # Anahtar birden fazla sayfaya yayilmis olabilir: ardisik aday
+        # sayfalari birlestirerek dene.
+        for bas in range(len(adaylar)):
+            birikmis, ilk = [], adaylar[bas]
+            for k in range(bas, min(bas + 4, len(adaylar))):
+                idx = adaylar[k]
+                if idx >= len(pdf.pages):
+                    continue
+                birikmis += _okuma_sirasi(_sayfa_ikilileri(pdf.pages[idx]))
+                if len(birikmis) < toplam_soru:
+                    continue
+                sonuc = _bloklara_ayir(birikmis, subjects)
+                if sonuc and all(len(v) == c for (s, c), v in zip(subjects, [sonuc[s] for s, _ in subjects])):
+                    return sonuc, "OK", ilk
+    return None, (
+        f"Cevap anahtarı sayfası bulundu ama {toplam_soru} cevap "
+        f"eşleştirilemedi. PDF'in düzeni beklenenden farklı."
+    ), (adaylar[0] if adaylar else None)

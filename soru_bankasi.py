@@ -807,7 +807,13 @@ def _esle(bolumler, anahtar):
 
 def _parcala(bolum, cevaplar, parca_soru):
     """Bir üniteyi, sayfa sınırlarını bozmadan, yaklaşık `parca_soru`
-    soruluk parçalara böler. parca_soru<=0 ise tek parça döner."""
+    soruluk parçalara böler. parca_soru<=0 ise tek parça döner.
+
+    ÖNEMLİ - KULLANICI İSTEĞİ ("son 30 kalanı ekleyerek bölsün"): Bölme
+    sonunda 5-7 soruluk minik bir artık parça kalabiliyordu ("5. Ünite
+    (2/2) - 7 soru"). Böyle bir kırıntı test olarak anlamsız; artık son
+    parça yarımdan azsa BİR ÖNCEKİ parçaya ekleniyor. Yani 32 soruluk bir
+    ünite 30'a bölünürse iki parça değil, 32 soruluk TEK test olur."""
     if parca_soru and parca_soru > 0:
         parcalar, su = [], None
         for sayfa, nums in bolum["sayfa_numaralari"]:
@@ -824,8 +830,14 @@ def _parcala(bolum, cevaplar, parca_soru):
                 if p["sayfalar"] and p["sayfalar"][-1] == sayfa - 1:
                     p["sayfalar"].append(sayfa)
                     break
+        # Sondaki kırıntı parçayı bir öncekine ekle
+        while len(parcalar) > 1 and len(parcalar[-1]["numaralar"]) < max(2, parca_soru // 2):
+            son = parcalar.pop()
+            parcalar[-1]["sayfalar"] += son["sayfalar"]
+            parcalar[-1]["numaralar"] += son["numaralar"]
         for p in parcalar:
             p["sayfalar"] = sorted(set(p["sayfalar"]))
+            p["numaralar"] = sorted(set(p["numaralar"]))
     else:
         parcalar = [{"sayfalar": list(bolum["sayfalar"]),
                      "numaralar": list(bolum["numaralar"])}]

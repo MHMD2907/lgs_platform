@@ -319,20 +319,49 @@ def bursluluk_indir(url, dest_path):
     return _download(url, dest_path)
 
 
+def _adres_varyantlari(url):
+    """Ayni dosyanin denenebilecek diger adresleri.
+
+    ONEMLI - GERCEK BIR HATA: Bursluluk sayfasindaki bazi baglantilar
+    "/mebpanel/meb_iys_dosyalar/..." ile basliyor. Bu adres yonetim paneline
+    ait; disaridan acilinca HTTP 403 (yasak) veriyor. Ayni dosya
+    "/mebpanel" onekI OLMADAN sorunsuz iniyor. Kullanicinin ekraninda
+    "2017 Bursluluk - 6. Sinif: indirilemedi (HTTP 403)" satiri tam olarak
+    buydu."""
+    adaylar = [url]
+    if "/mebpanel/" in url:
+        adaylar.append(url.replace("/mebpanel/", "/", 1))
+    if "http://" in url:
+        adaylar.append(url.replace("http://", "https://", 1))
+    # tekrarlari koru, sirayi bozma
+    gorulen, temiz = set(), []
+    for u in adaylar:
+        if u not in gorulen:
+            gorulen.add(u)
+            temiz.append(u)
+    return temiz
+
+
 def _download(url, dest_path):
-    try:
-        resp = requests.get(url, headers=_BASLIKLAR, timeout=TIMEOUT, stream=True)
-    except requests.exceptions.RequestException as e:
-        return False, f"Bağlantı hatası: {e}"
-    if resp.status_code != 200:
-        return False, f"HTTP {resp.status_code}"
-    content = resp.content
-    if content[:4] != b"%PDF":
-        return False, "İndirilen dosya PDF değil (site yapısı değişmiş olabilir)."
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    with open(dest_path, "wb") as f:
-        f.write(content)
-    return True, "OK"
+    son = "Bilinmeyen hata"
+    for aday in _adres_varyantlari(url):
+        try:
+            resp = requests.get(aday, headers=_BASLIKLAR, timeout=TIMEOUT, stream=True)
+        except requests.exceptions.RequestException as e:
+            son = f"Bağlantı hatası: {e}"
+            continue
+        if resp.status_code != 200:
+            son = f"HTTP {resp.status_code}"
+            continue
+        content = resp.content
+        if content[:4] != b"%PDF":
+            son = "İndirilen dosya PDF değil (site yapısı değişmiş olabilir)."
+            continue
+        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+        with open(dest_path, "wb") as f:
+            f.write(content)
+        return True, "OK"
+    return False, son
 
 
 def candidate_urls(yil, bolum, scraped=None):

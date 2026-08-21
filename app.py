@@ -725,7 +725,7 @@ def _pdf_page_count(path, mtime_ns):
 
 
 @st.cache_data(show_spinner=False, max_entries=60)
-def _pdf_page_image(path, mtime_ns, page_num, dpi=130):
+def _pdf_page_image(path, mtime_ns, page_num, dpi=175):
     """Bir PDF sayfasini DUZ BIR RESME (JPEG bayt dizisi) cevirir.
 
     ONEMLI - NEDEN RESIM: PDF'i tarayiciya gomup gostermenin denenen HER
@@ -757,7 +757,13 @@ def _pdf_page_image(path, mtime_ns, page_num, dpi=130):
     finally:
         doc.close()
     buf = io.BytesIO()
-    pil.convert("RGB").save(buf, format="JPEG", quality=80)
+    # ÖNEMLİ - NETLİK: Çözünürlük 130 dpi / kalite 80 idi; büyük bir
+    # bilgisayar ekranında yazılar puslu görünüyordu ("PC'de neden net
+    # gözükmüyor"). Ölçüldü: 175 dpi + kalite 88 ile sayfa 1075px yerine
+    # 1447px genişliğinde geliyor, dosya 115 KB'tan 211 KB'a çıkıyor ve
+    # çizim süresi DEĞİŞMİYOR (0,11 sn). Yani netlik bedavaya iki katına
+    # yakın arttı.
+    pil.convert("RGB").save(buf, format="JPEG", quality=88)
     return buf.getvalue()
 
 
@@ -781,6 +787,14 @@ def _fragman(f):
     """Bir fonksiyonu 'bagimsiz yenilenebilir parca' haline getirir."""
     frag = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
     return frag(f) if frag else f
+
+
+_NETLIK = {
+    "🔍 Normal": 175,
+    "🔍 Yüksek netlik": 220,
+    "🔍 En yüksek (yavaş)": 270,
+    "⚡ Hızlı (düşük netlik)": 130,
+}
 
 
 def show_pdf(path, height=780):
@@ -836,8 +850,12 @@ def show_pdf(path, height=780):
 
     _nav_row("top")
 
+    _netlik_ad = st.session_state.get("_pdf_netlik") or "🔍 Normal"
     try:
-        img_bytes = _pdf_page_image(path, os.stat(path).st_mtime_ns, st.session_state[state_key])
+        img_bytes = _pdf_page_image(
+            path, os.stat(path).st_mtime_ns, st.session_state[state_key],
+            dpi=_NETLIK.get(_netlik_ad, 175),
+        )
     except Exception as e:
         st.error(f"Sayfa gösterilirken hata oluştu: {e}")
         return
@@ -845,7 +863,17 @@ def show_pdf(path, height=780):
     with st.container(height=height, border=True):
         st.image(img_bytes, use_container_width=True)
 
-    st.caption(f"📄 Sayfa {st.session_state[state_key] + 1} / {page_count}")
+    _c1, _c2 = st.columns([2, 3])
+    _c1.caption(f"📄 Sayfa {st.session_state[state_key] + 1} / {page_count}")
+    with _c2:
+        st.selectbox(
+            "Görüntü netliği",
+            list(_NETLIK.keys()),
+            key="_pdf_netlik",
+            label_visibility="collapsed",
+            help=("Yazılar puslu görünüyorsa netliği artırın. Yüksek netlik "
+                  "sayfayı biraz daha yavaş getirir ama okumak kolaylaşır."),
+        )
     _nav_row("bottom")
 
     with st.expander("⬇️ Kitapçığın tamamını indir"):
@@ -2219,20 +2247,22 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
             qb_path_state = "_qb_path"
 
             _parca_secenek = {
-                "Ünitenin tamamı tek test olsun": 0,
-                "En fazla 40 soruluk parçalara böl": 40,
-                "En fazla 25 soruluk parçalara böl": 25,
-                "En fazla 15 soruluk parçalara böl": 15,
+                "30 soruluk testlere böl (önerilen)": 30,
+                "40 soruluk testlere böl": 40,
+                "25 soruluk testlere böl": 25,
+                "15 soruluk testlere böl": 15,
+                "Bölme — ünitenin tamamı tek test olsun": 0,
             }
             _parca_ad = st.selectbox(
                 "Ünite/tema düzenli kitaplarda testleri nasıl bölelim?",
                 list(_parca_secenek.keys()),
-                index=2,
+                index=0,
                 key="qb_parca",
                 help=(
                     "MEB çalışma kitaplarında bir ünitede 150 soru olabiliyor; tek oturumda "
                     "çözmek zor. Bölerseniz her parça ayrı bir test olarak eklenir, soru "
-                    "numaraları kitaptakiyle aynı kalır."
+                    "numaraları kitaptakiyle aynı kalır. Sonda küçük bir artık kalırsa "
+                    "(örneğin 7 soru) ayrı test yapılmaz, bir önceki teste eklenir."
                 ),
             )
             st.caption(
@@ -2240,11 +2270,21 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                 "bankalarında testler zaten kısa olduğu için bölünmez."
             )
 
-            if qb_file is not None and st.button("📖 Kitabı Tara", type="primary"):
+            if qb_file is None:
+                st.info("⬆️ Önce yukarıdan bir PDF seçin; ardından tarama düğmesi çıkacak.")
+            else:
+                st.markdown(
+                    f"✅ **{qb_file.name}** yüklendi ({qb_file.size / 1e6:.0f} MB). "
+                    f"Şimdi aşağıdaki düğmeye basın 👇"
+                )
+            if qb_file is not None and st.button(
+                    "📖 KİTABI TARA VE TESTLERİ BUL", type="primary",
+                    use_container_width=True, key="qb_tara_btn"):
                 _qb_path = os.path.join(PRIVATE_DIR, "_soru_bankasi.pdf")
                 with open(_qb_path, "wb") as f:
                     f.write(qb_file.getbuffer())
-                with st.spinner("Kitap taranıyor, testler ve cevap anahtarı bulunuyor..."):
+                with st.spinner("📖 Kitap taranıyor: üniteler, soru numaraları ve cevap "
+                                "anahtarı bulunuyor... (büyük kitaplarda 1-2 dakika sürebilir)"):
                     try:
                         _testler, _anahtar, _uyarilar = soru_bankasi.testleri_bul(
                             _qb_path, parca_soru=_parca_secenek[_parca_ad]
@@ -2254,6 +2294,7 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                 st.session_state[qb_path_state] = _qb_path
                 st.session_state["_qb_testler"] = _testler
                 st.session_state["_qb_uyarilar"] = _uyarilar
+                st.session_state["_islem_balon"] = bool(_testler)
                 st.rerun()
 
             _testler = st.session_state.get("_qb_testler")
