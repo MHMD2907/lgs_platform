@@ -48,6 +48,56 @@ os.makedirs(PDF_DIR, exist_ok=True)
 PRIVATE_DIR = os.path.join(BASE_DIR, "private_pdfs")
 os.makedirs(PRIVATE_DIR, exist_ok=True)
 
+# =====================================================================
+#  DOSYA SÜRÜMÜ KONTROLÜ
+# =====================================================================
+# ÖNEMLİ - GERÇEK BİR KAZA: Kullanıcı GitHub'a app.py'yi yükledi ama db.py'yi
+# eski bıraktı. Yeni app.py, db.py'de HENÜZ OLMAYAN fonksiyonları çağırınca
+# uygulama anlaşılmaz bir hatayla ("InFailedSqlTransaction ... get_students")
+# tamamen çöktü. Hata mesajı da yanıltıcıydı: asıl sorun bambaşka yerdeydi.
+#
+# Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
+# ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
+_GEREKLI_PARCALAR = [
+    ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
+                   "exam_pdf_guncelle", "PDF_SAKLAMA_SINIRI"]),
+    ("soru_bankasi.py", soru_bankasi, ["unite_kitabini_coz", "testleri_bul"]),
+    ("parsing.py", parsing, ["gorsel_kucult"]),
+    ("bot.py", bot, ["scrape_bursluluk", "fetch_lgs_year"]),
+]
+
+
+def _eksik_dosyalar():
+    """Hangi yardımcı dosyalar eski sürümde kalmış?"""
+    eksik = []
+    for ad, modul, gerekli in _GEREKLI_PARCALAR:
+        if any(not hasattr(modul, x) for x in gerekli):
+            eksik.append(ad)
+    return eksik
+
+
+def _surum_uyarisi_goster():
+    eksik = _eksik_dosyalar()
+    if not eksik:
+        return False
+    st.error(
+        "### ⚠️ Dosyalardan bazıları eski sürümde\n\n"
+        "Uygulamanın yeni sürümü, yanındaki şu dosyaların da yeni sürümüne "
+        "ihtiyaç duyuyor ama onlar hâlâ eski:\n\n"
+        + "\n".join(f"- **{d}**" for d in eksik)
+        + "\n\n**Yapmanız gereken:** Bilgisayarınızdaki `Masaüstü\\lgs_platform` "
+        "klasöründen bu dosyaları da GitHub'a yükleyin "
+        "(**Add file → Upload files → Commit changes**), sonra Streamlit'te "
+        "**Manage app → ⋮ → Reboot app** deyin.\n\n"
+        "Bu ekranı görmeye devam ederseniz, dosyanın GitHub'a gerçekten "
+        "yüklendiğinden emin olun — Streamlit bazen eski kodu bir süre daha "
+        "sunmaya devam ediyor.",
+        icon="🛑",
+    )
+    st.stop()
+    return True
+
+
 @st.cache_resource(show_spinner=False)
 def _veritabanini_hazirla():
     """Tabloları oluşturur ve yönetici hesabını hazırlar -- SADECE BİR KEZ.
@@ -1261,6 +1311,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 inject_css()
+
+# Yanındaki dosyalar eski sürümdeyse ÇÖKMEDEN önce net bir mesaj göster.
+_surum_uyarisi_goster()
 
 # Tablolar ve yönetici hesabı: uygulama ömrü boyunca yalnızca BİR KEZ hazırlanır
 # (bkz. _veritabanini_hazirla üstündeki açıklama). st.set_page_config'ten sonra

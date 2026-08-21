@@ -79,11 +79,27 @@ class _PgCursor:
         except Exception as e:
             # Uzun süre kullanılmayan bağlantıyı sunucu kapatmış olabilir.
             # Böyle bir durumda sessizce yeni bağlantı kurup bir kez daha dene.
-            if not _baglanti_kopmus(e):
-                raise
-            self._owner._reset()
-            self._cur = self._owner._raw().cursor()
-            self._cur.execute(_to_pg(sql), tuple(params))
+            if _baglanti_kopmus(e):
+                self._owner._reset()
+                self._cur = self._owner._raw().cursor()
+                self._cur.execute(_to_pg(sql), tuple(params))
+                return self
+            # ÖNEMLİ - "InFailedSqlTransaction" HATASININ KÖK NEDENİ:
+            # PostgreSQL'de bir komut hata verdiğinde, O BAĞLANTIDAKİ TÜM
+            # İŞLEM iptal olur ve arkasından gelen HER komut
+            # "current transaction is aborted" hatası verir. Yani tek bir
+            # başarısız sorgu, bağlantıyı ZEHİRLİYOR: kullanıcı bambaşka bir
+            # sayfaya gitse bile uygulama çöküyordu. (Kullanıcının gördüğü
+            # ekran tam olarak buydu: hata "get_students" satırında patladı
+            # ama asıl bozulan komut çok daha önce çalışmıştı.)
+            #
+            # Çözüm: hatalı komuttan hemen sonra işlemi geri al. Böylece
+            # bağlantı temiz kalır, hata sadece o komutu etkiler.
+            try:
+                self._owner._raw().rollback()
+            except Exception:
+                self._owner._reset()
+            raise
         return self
 
     def fetchone(self):
@@ -390,6 +406,11 @@ def init_db():
     for cat in DEFAULT_CATEGORIES:
         c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
 
+    # ÖNEMLİ: Şemayı adım adım kaydediyoruz. PostgreSQL'de tek bir komutun
+    # hata vermesi TÜM işlemi iptal ettiği için, hepsini tek bir commit'e
+    # bırakmak "bir tablo oluşamadı diye hiçbiri oluşmadı" demek olurdu.
+    conn.commit()
+
     # Eski veritabanlarında olmayabilecek sütunları güvenli şekilde ekle
     # (var olan bir kuruluma dokunmadan yükseltme yapabilmek için).
     try:
@@ -432,6 +453,8 @@ def init_db():
         c.execute("ALTER TABLE exams ADD COLUMN source_url TEXT")
     except Exception:
         pass  # sütun zaten var
+
+    conn.commit()
 
     # Uygulama ayarlari (ornegin rapor PIN kodu) icin basit anahtar-deger tablosu
     c.execute(
