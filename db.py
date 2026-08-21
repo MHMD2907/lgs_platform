@@ -1121,3 +1121,23 @@ def exam_kaynak_adresi_yaz(exam_id, url):
     conn.execute("UPDATE exams SET source_url = ? WHERE id = ?", (url, exam_id))
     conn.commit()
     conn.close()
+
+
+@_yazma
+def exam_pdf_guncelle(exam_id, pdf_path, pdf_path_original=None):
+    """Var olan bir denemenin kitapçık dosya yolunu günceller.
+
+    ÖNEMLİ - NEDEN SİLİP YENİDEN EKLEMİYORUZ: Denemeyi silmek, o denemeye
+    ait GEÇMİŞ SONUÇLARI da siler (results tablosunda exam_id'ye bağlı
+    ON DELETE CASCADE vardır). Kitapçığı yeniden indirip aynı kayda
+    bağlamak, çocuğun çözdüğü sınavların sonuçlarını korur."""
+    conn = get_conn()
+    if pdf_path_original:
+        conn.execute(
+            "UPDATE exams SET pdf_path = ?, pdf_path_original = ? WHERE id = ?",
+            (pdf_path, pdf_path_original, exam_id),
+        )
+    else:
+        conn.execute("UPDATE exams SET pdf_path = ? WHERE id = ?", (pdf_path, exam_id))
+    conn.commit()
+    conn.close()

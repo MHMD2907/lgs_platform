@@ -2945,6 +2945,87 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     st.session_state["_islem_balon"] = bool(_ok_say)
                     st.rerun()
 
+            # ---- SİLMEDEN ONARIM: LGS/bursluluk kitapçıklarını yeniden indir ----
+            # ÖNEMLİ: Denemeyi SİLMEK, o denemeye ait GEÇMİŞ SONUÇLARI da siler.
+            # Otomatik indirilen kitapçıklar MEB arşivinden yeniden inebildiği
+            # için, önce bunu deniyoruz: kayıt aynı kalır, sonuçlar korunur.
+            _indirilebilir = [
+                _e for _e in _bozuk
+                if (_e.get("source") or "").startswith("otomatik")
+                and re.search(r"(20\d{2})", _e["title"] or "")
+            ]
+            if _indirilebilir:
+                st.info(
+                    f"♻️ **{len(_indirilebilir)} tanesi MEB arşivinden yeniden "
+                    f"indirilebilir.** Bu yol denemeyi SİLMEZ; aynı kayda yeni "
+                    f"kitapçık bağlanır, yani **çocuğunuzun o sınavlardaki geçmiş "
+                    f"sonuçları korunur.** Önce bunu deneyin."
+                )
+                if st.button(f"♻️ {len(_indirilebilir)} kitapçığı yeniden indir "
+                             f"(sonuçlar korunur)", type="primary", key="_yeniden_indir"):
+                    _bar = st.progress(0.0, text="Başlıyor...")
+                    _ok_say, _mesajlar = 0, []
+                    for _i, _e in enumerate(_indirilebilir, start=1):
+                        _yil = int(re.search(r"(20\d{2})", _e["title"]).group(1))
+                        _oran = _i / len(_indirilebilir)
+                        _bar.progress(_oran, text=f"{_e['title']} indiriliyor... ({_i}/{len(_indirilebilir)})")
+                        try:
+                            if (_e.get("source") or "") == "otomatik-iokbs":
+                                _mesajlar.append((
+                                    "error",
+                                    f"⚠️ {_e['title']}: bursluluk kitapçıkları yeniden "
+                                    f"indirme ile onarılamıyor; 'Bursluluk (İOKBS) "
+                                    f"Otomatik İndir' bölümünden yeniden ekleyin.",
+                                ))
+                                continue
+                            _res = bot.fetch_lgs_year(_yil, PDF_DIR)
+                            if not (_res.get("Sözel") and _res.get("Sayısal")):
+                                _mesajlar.append((
+                                    "error",
+                                    f"❌ {_e['title']}: kitapçık MEB arşivinde bulunamadı "
+                                    f"({'; '.join(_res.get('hatalar', [])[:2]) or 'sebep bilinmiyor'}).",
+                                ))
+                                continue
+                            _bar.progress(_oran, text=f"{_e['title']}: cevap anahtarı sayfası bulunuyor...")
+                            _sk, _sm, _si = parsing.extract_answer_key(
+                                _res["Sözel"], [(n, c) for n, c, _ in LGS_SUBJECTS["Sözel"]])
+                            _yk, _ym, _yi2 = parsing.extract_answer_key(
+                                _res["Sayısal"], [(n, c) for n, c, _ in LGS_SUBJECTS["Sayısal"]])
+                            if _si is None or _yi2 is None:
+                                _mesajlar.append((
+                                    "error",
+                                    f"⚠️ {_e['title']}: indirildi ama cevap anahtarı sayfası "
+                                    f"bulunamadı ({_sm or _ym}); kırpılamadı.",
+                                ))
+                                continue
+                            _yeni_yol = os.path.join(PDF_DIR, f"{_yil}_LGS_guvenli.pdf")
+                            _bar.progress(_oran, text=f"{_e['title']}: kitapçık hazırlanıyor...")
+                            parsing.crop_and_merge(
+                                [(_res["Sözel"], _si), (_res["Sayısal"], _yi2)], _yeni_yol)
+                            _orij2 = os.path.join(PRIVATE_DIR, f"{_yil}_LGS_orijinal.pdf")
+                            parsing.merge_full([_res["Sözel"], _res["Sayısal"]], _orij2)
+                            if os.path.getsize(_yeni_yol) > db.PDF_SAKLAMA_SINIRI:
+                                parsing.gorsel_kucult(_yeni_yol, sinir=db.PDF_SAKLAMA_SINIRI)
+                            db.exam_pdf_guncelle(_e["id"], _yeni_yol, _orij2)
+                            with open(_yeni_yol, "rb") as _fh:
+                                _kok, _kmsj = db.pdf_kaydet(
+                                    _e["id"], os.path.basename(_yeni_yol), _fh.read())
+                            if _kok:
+                                _ok_say += 1
+                                _mesajlar.append(("success", f"✅ {_e['title']}: kitapçık geri geldi, sonuçlar korundu."))
+                            else:
+                                _mesajlar.append(("error", f"⚠️ {_e['title']}: indirildi ama kalıcı kopya saklanamadı ({_kmsj})."))
+                        except Exception as _ex:
+                            _mesajlar.append(("error", f"❌ {_e['title']}: {_ex}"))
+                    _bar.empty()
+                    _mesajlar.insert(0, (
+                        "success" if _ok_say else "error",
+                        f"♻️ {_ok_say} kitapçık yeniden indirildi ve kalıcı olarak saklandı.",
+                    ))
+                    st.session_state["_admin_flash"] = _mesajlar
+                    st.session_state["_islem_balon"] = bool(_ok_say)
+                    st.rerun()
+
             if not _bozuk:
                 st.success("🎉 Kitapçığı kayıp deneme yok; hepsi açılabilir durumda.")
             else:
@@ -2960,10 +3041,14 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                      "Kaynak": _e.get("source") or "—"}
                     for _e in _bozuk
                 ]))
-                st.caption(
-                    "Silmek sadece kitapçığı ve sınav kaydını siler; **öğrenci hesapları "
-                    "ve geçmiş sonuçlar** ayrı tabloda durur. Ancak silinen sınavın eski "
-                    "sonuçları da listeden kalkar."
+                st.error(
+                    "⚠️ **DİKKAT — silmek geri alınamaz.** Bir denemeyi silmek, o denemeye "
+                    "ait **geçmiş sonuçları da siler** (çocuğunuzun o sınavdan aldığı netler, "
+                    "soru dökümü, düzeltme turları). Öğrenci hesapları ve DİĞER sınavların "
+                    "sonuçları etkilenmez.\n\n"
+                    "Bu yüzden önce yukarıdaki **♻️ yeniden indir** yolunu deneyin; o yol "
+                    "hiçbir şey silmez. Silme, ancak kitapçığı başka türlü geri "
+                    "getirilemeyen denemeler için son çaredir."
                 )
                 _onay = st.checkbox(
                     f"Evet, kitapçığı kayıp {len(_bozuk)} denemeyi silmek istiyorum",
