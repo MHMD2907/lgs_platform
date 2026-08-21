@@ -137,6 +137,35 @@ def _istatistik_al():
         return None, f"Sayaçlar hesaplanamadı: {e}"
 
 
+def _kutu(anahtar, **kw):
+    """CSS ile hedeflenebilen bir kutu ureti (st-key-<anahtar> sinifi alir).
+
+    Streamlit'in eski surumlerinde 'key' parametresi yoktur; o durumda
+    sade bir kutu doner (gorunum biraz farkli olur, ama calisir)."""
+    try:
+        return st.container(key=anahtar, **kw)
+    except TypeError:
+        return st.container(**kw)
+
+
+def _dogal_sira(baslik):
+    """'Matematik Test 10' basligini DOGRU siralamak icin anahtar uretir.
+
+    Duz metin siralamasinda 'Test 10' < 'Test 9' cikar (cunku '1' < '9').
+    Bu fonksiyon metindeki sayilari gercek sayi olarak ayirir; boylece
+    liste 1, 2, 3 ... 9, 10, 11 diye dogru sirayla dizilir."""
+    parcalar = re.split(r"(\d+)", str(baslik or ""))
+    return [int(p) if p.isdigit() else p.lower().translate(TR_MAP) for p in parcalar]
+
+
+def _gun_bicimle(ham):
+    """'2026-08-20T07:11:11' -> '20.08.2026' (sadece gun -- gunluk toplamlar icin)."""
+    try:
+        return datetime.fromisoformat(str(ham)).strftime("%d.%m.%Y")
+    except (TypeError, ValueError):
+        return str(ham or "")[:10]
+
+
 def _tarih_bicimle(ham):
     """'2026-08-20T07:11:11' -> '20.08.2026  07:11' (okunakli hale getirir)."""
     try:
@@ -166,6 +195,137 @@ def _tablo(df):
     )
 
 
+# =====================================================================
+#  AÇILIR PENCERE (MODAL) YÖNETİMİ
+# =====================================================================
+# ÖNEMLİ - İKİ AYRI HATANIN KÖK NEDENİ BURASIYDI:
+#
+# 1) "Basmadığım halde sonuç penceresi kendiliğinden açılıyor":
+#    Pencereyi açan işaret (ör. "_ozet_sonuc") oturum belleğine yazılıyor
+#    ama SADECE "Kapat" düğmesine basılınca siliniyordu. Pencerenin sağ
+#    üstündeki X ile ya da dışına dokunarak kapatıldığında işaret yerinde
+#    kalıyor, bir sonraki ekran yenilemesinde pencere yeniden açılıyordu.
+#    Üstelik başka bir teste geçilse bile ESKİ testin sonucu açılıyordu --
+#    "her seferinde ilk çözdüğüm bilgisi geliyor" şikâyetinin sebebi buydu.
+#    Çözüm: X ile kapatma da (on_dismiss) işareti siliyor.
+#
+# 2) Program tamamen çöküyordu (AssertionError):
+#    Streamlit'te bir ekran yenilemesinde EN FAZLA BİR pencere açılabilir.
+#    "Sınav Çöz" ile "Gelişim Raporum" aynı anda çizildiği için ikisi de
+#    pencere açmak isteyince uygulama çöküyordu. Çözüm: aşağıdaki sayaç --
+#    turda ilk isteyen pencereyi açar, ikincisi sessizce beklemeye alınır.
+_PENCERE = {"acildi": False}
+
+
+def _pencere_tasima_scripti():
+    """Açılan pencereyi başlığından tutup SÜRÜKLEYEREK taşımayı sağlar.
+
+    Streamlit'in kendi penceresi ekranın ortasına sabitlenmiştir ve
+    kıpırdatılamaz; arkasındaki tabloyu görmek isteyen kullanıcı için bu
+    can sıkıcıydı. Aşağıdaki küçük betik pencerenin başlık çubuğuna
+    'tutulabilir' özelliği ekler (hem fare hem parmakla)."""
+    try:
+        import streamlit.components.v1 as _bilesenler
+    except Exception:
+        return
+    _bilesenler.html(
+        """
+        <script>
+        (function () {
+          const doc = window.parent && window.parent.document;
+          if (!doc) return;
+          function hazirla() {
+            // Streamlit surumune gore pencerenin etiketi degisebiliyor.
+            const p = doc.querySelector(
+              '[data-testid="stDialog"] [role="dialog"], [role="dialog"], [data-testid="stDialog"] section'
+            );
+            if (!p || p.dataset.lgsTasinabilir) return;
+            p.dataset.lgsTasinabilir = "1";
+            const bas = p.querySelector('h2') || p.firstElementChild;
+            if (!bas) return;
+            bas.style.cursor = "move";
+            bas.title = "Bu başlıktan tutup pencereyi taşıyabilirsiniz";
+            let sx = 0, sy = 0, dx = 0, dy = 0, tutuluyor = false;
+            const nokta = (e) => (e.touches && e.touches[0]) ? e.touches[0] : e;
+            function basla(e) {
+              const n = nokta(e); tutuluyor = true;
+              sx = n.clientX - dx; sy = n.clientY - dy;
+              e.preventDefault();
+            }
+            function hareket(e) {
+              if (!tutuluyor) return;
+              const n = nokta(e);
+              dx = n.clientX - sx; dy = n.clientY - sy;
+              p.style.transform = "translate(" + dx + "px," + dy + "px)";
+              e.preventDefault();
+            }
+            function bitir() { tutuluyor = false; }
+            bas.addEventListener("mousedown", basla);
+            bas.addEventListener("touchstart", basla, {passive: false});
+            doc.addEventListener("mousemove", hareket);
+            doc.addEventListener("touchmove", hareket, {passive: false});
+            doc.addEventListener("mouseup", bitir);
+            doc.addEventListener("touchend", bitir);
+          }
+          hazirla();
+          setInterval(hazirla, 400);
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _pencere_ac(baslik, govde, temizlenecek=(), genislik="large"):
+    """Tek bir açılır pencere çizer.
+
+    baslik      : pencerenin üst yazısı
+    govde       : pencerenin içini çizen fonksiyon
+    temizlenecek: pencere kapandığında oturum belleğinden silinecek anahtarlar
+                  (X ile kapatmada da silinir -- bkz. yukarıdaki not)"""
+    if _PENCERE["acildi"]:
+        return  # bu turda zaten bir pencere açıldı; ikincisi çökmeye yol açardı
+    _PENCERE["acildi"] = True
+
+    def _kapat_isaretlerini_sil():
+        for k in temizlenecek:
+            st.session_state.pop(k, None)
+
+    def _govde_ve_kapat():
+        govde()
+        st.divider()
+        if st.button("✖ Kapat", key=f"_kapat_{baslik}", use_container_width=True):
+            _kapat_isaretlerini_sil()
+            st.rerun()
+
+    dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+    if dialog is None:
+        with st.container(border=True):
+            st.markdown(f"#### {baslik}")
+            _govde_ve_kapat()
+        return
+
+    kw = {"width": genislik}
+    try:
+        import inspect as _ins
+        if "on_dismiss" in _ins.signature(dialog).parameters:
+            kw["on_dismiss"] = _kapat_isaretlerini_sil
+    except Exception:
+        pass
+
+    try:
+        @dialog(baslik, **kw)
+        def _p():
+            _govde_ve_kapat()
+        _p()
+        _pencere_tasima_scripti()
+    except Exception:
+        # Streamlit'in eski sürümlerinde pencere açılamazsa program çökmesin.
+        with st.container(border=True):
+            st.markdown(f"#### {baslik}")
+            _govde_ve_kapat()
+
+
 def _ozet_penceresi(r):
     """Bir sinav sonucunun OZETINI (net, dogru/yanlis/bos) tam genislikte bir
     pencerede gosterir. Ayrintili soru dokumu burada YOK -- o, PIN korumali
@@ -192,21 +352,120 @@ def _ozet_penceresi(r):
         if r.get("weighted_score") is not None:
             st.caption(f"Tahmini ağırlıklı puan göstergesi: {r['weighted_score']}")
         st.info("Hangi soruyu yanlış yaptığını görmek için **Gelişim Raporum** sekmesindeki "
-                "ders kutucuğuna dokun (PIN kodu gerekir).")
-        if st.button("Kapat", key=f"_ozet_kapat_{r['id']}", use_container_width=True):
-            st.session_state.pop("_ozet_sonuc", None)
-            st.rerun()
+                "**🔍 Sınav Detayı** düğmesine dokun (PIN kodu gerekir).")
 
-    dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
-    if dialog:
-        @dialog("📊 Sınav Sonucu", width="large")
-        def _pencere():
-            _govde()
-        _pencere()
-    else:
-        with st.container(border=True):
-            st.markdown("#### 📊 Sınav Sonucu")
-            _govde()
+    _pencere_ac("📊 Sınav Sonucu", _govde, temizlenecek=("_ozet_sonuc",))
+
+
+def _sonuc_sayilari(r):
+    """Bir sonuc kaydindan (soru, dogru, yanlis, bos, net) degerlerini cikarir."""
+    ps = r.get("per_subject") or {}
+    d = sum(int(v.get("dogru", 0) or 0) for v in ps.values())
+    y = sum(int(v.get("yanlis", 0) or 0) for v in ps.values())
+    b = sum(int(v.get("bos", 0) or 0) for v in ps.values())
+    return d + y + b, d, y, b, r.get("total_net")
+
+
+def _degerlendirme_penceresi(secilenler):
+    """Isaretlenen sinavlarin TOPLU degerlendirmesini tek pencerede gosterir.
+
+    Icerik (istenen sirayla):
+      1. Secilen her sinavin dokumu (dogru/yanlis/bos/net)
+      2. Ayni sinavin ILK cozumu ile SONRAKI (ikinci sans) turlarinin
+         karsilastirmasi -- ilkte kac dogru, sonrakinde kac dogru
+      3. AYNI GUN cozulen her seyin toplami: kac soru, kac dogru, kac yanlis"""
+
+    def _govde():
+        st.markdown(f"**{len(secilenler)} sınav** seçildi.")
+
+        # ---- 1) Seçilen sınavların dökümü ----
+        _t, _d, _y, _b = 0, 0, 0, 0
+        _satir = []
+        for r in sorted(secilenler, key=lambda x: str(x.get("created_at") or "")):
+            s, d, y, b, net = _sonuc_sayilari(r)
+            _t, _d, _y, _b = _t + s, _d + d, _y + y, _b + b
+            _satir.append({
+                "Sınav": r["exam_title"],
+                "🗓️ Tarih": _tarih_bicimle(r["created_at"]),
+                "Tür": "🎯 İkinci şans" if r.get("mode") == "yanlis" else "📝 Tam sınav",
+                "Soru": s, "✅ Doğru": d, "❌ Yanlış": y, "⬜ Boş": b, "Net": net,
+            })
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("❓ Toplam Soru", _t)
+        m2.metric("✅ Doğru", _d)
+        m3.metric("❌ Yanlış", _y)
+        m4.metric("⬜ Boş", _b)
+        if _t:
+            st.progress(_d / _t, text=f"Başarı oranı: **%{round(100 * _d / _t)}**")
+        _tablo(pd.DataFrame(_satir))
+
+        # ---- 2) İlk çözüm / sonraki şans karşılaştırması ----
+        st.markdown("#### 🔁 İlk Çözüm / Sonraki Şans")
+        _gruplar = {}
+        for r in secilenler:
+            _gruplar.setdefault(r["exam_id"], []).append(r)
+        _karsilastirma = []
+        for _eid, _rs in _gruplar.items():
+            if len(_rs) < 2:
+                continue
+            _rs = sorted(_rs, key=lambda x: (x.get("attempt_no") or 0, str(x.get("created_at") or "")))
+            _ilk, _son = _rs[0], _rs[-1]
+            _si, _di, _yi, _bi, _ni = _sonuc_sayilari(_ilk)
+            _ss, _ds, _ys, _bs, _ns = _sonuc_sayilari(_son)
+            _karsilastirma.append({
+                "Sınav": _ilk["exam_title"],
+                "Tur Sayısı": len(_rs),
+                "İlk: Soru": _si, "İlk: ✅": _di, "İlk: ❌": _yi, "İlk: Net": _ni,
+                "Son: Soru": _ss, "Son: ✅": _ds, "Son: ❌": _ys, "Son: Net": _ns,
+                "Düzelttiği": max(0, _yi + _bi - (_ys + _bs)),
+            })
+        if _karsilastirma:
+            _tablo(pd.DataFrame(_karsilastirma))
+            _toplam_duzelen = sum(x["Düzelttiği"] for x in _karsilastirma)
+            if _toplam_duzelen:
+                st.success(
+                    f"👏 İkinci şans turlarında toplam **{_toplam_duzelen} soruyu** "
+                    f"düzeltmişsin!"
+                )
+        else:
+            st.caption(
+                "Seçtiklerin arasında aynı sınavın birden fazla turu yok. "
+                "Karşılaştırma için bir sınavın hem ilk çözümünü hem de ikinci "
+                "şans turunu birlikte işaretle."
+            )
+
+        # ---- 3) Aynı gün toplamları ----
+        st.markdown("#### 🗓️ Gün Gün Toplam")
+        _gunler = {}
+        for r in secilenler:
+            g = _gunler.setdefault(
+                _gun_bicimle(r.get("created_at")),
+                {"sinav": 0, "soru": 0, "dogru": 0, "yanlis": 0, "bos": 0, "net": 0.0},
+            )
+            s, d, y, b, net = _sonuc_sayilari(r)
+            g["sinav"] += 1
+            g["soru"] += s
+            g["dogru"] += d
+            g["yanlis"] += y
+            g["bos"] += b
+            g["net"] += float(net or 0)
+        _tablo(pd.DataFrame([
+            {
+                "🗓️ Gün": k, "Sınav": v["sinav"], "Soru": v["soru"],
+                "✅ Doğru": v["dogru"], "❌ Yanlış": v["yanlis"], "⬜ Boş": v["bos"],
+                "Toplam Net": round(v["net"], 2),
+            }
+            for k, v in sorted(_gunler.items())
+        ]))
+        st.caption(
+            "Not: Soru soru hangi soruyu yanlış yaptığını görmek için listedeki "
+            "**🔍 Sınav Detayı** düğmesini kullan (PIN kodu ile korunur)."
+        )
+
+    _pencere_ac(
+        "📊 Seçilen Sınavların Değerlendirmesi", _govde,
+        temizlenecek=("_dege_acik", "_dege_ids"),
+    )
 
 
 def _detay_icerigi(r, vurgu_ders=None):
@@ -261,39 +520,28 @@ def _detay_penceresi(r, vurgu_ders=None):
     pin = db.get_setting("rapor_pin", "") or ""
 
     def _govde():
-        if pin:
+        if pin and not st.session_state.get("_pin_ok_oturum"):
+            st.warning("Bu döküm doğru cevapları içerir, PIN kodu ile korunuyor.")
             girilen = st.text_input(
                 "PIN kodu", type="password", key=f"_pin_giris_{r['id']}",
                 help="Bu kodu yönetici belirler (Admin Paneli → Hesap Ayarları).",
             )
-            c1, c2 = st.columns(2)
-            if c1.button("Aç", key=f"_pin_ac_{r['id']}", type="primary", use_container_width=True):
+            if st.button("🔓 Aç", key=f"_pin_ac_{r['id']}", type="primary",
+                         use_container_width=True):
                 if girilen == pin:
-                    st.session_state[f"_pin_ok_{r['id']}"] = True
+                    # PIN bir kez girildikten sonra oturum boyunca tekrar
+                    # sorulmaz; her sınav için yeniden yazmak zahmetliydi.
+                    st.session_state["_pin_ok_oturum"] = True
                     st.rerun()
                 else:
                     st.error("PIN kodu yanlış.")
-            if c2.button("Kapat", key=f"_pin_kapat_{r['id']}", use_container_width=True):
-                st.session_state["_detay_acik"] = False
-                st.rerun()
-            if not st.session_state.get(f"_pin_ok_{r['id']}"):
-                return
+            return
         _detay_icerigi(r, vurgu_ders)
-        if st.button("Kapat", key=f"_detay_kapat_{r['id']}", use_container_width=True):
-            st.session_state["_detay_acik"] = False
-            st.session_state.pop(f"_pin_ok_{r['id']}", None)
-            st.rerun()
 
-    dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
-    if dialog:
-        @dialog("🔐 Sınav Detayı", width="large")
-        def _pencere():
-            _govde()
-        _pencere()
-    else:
-        with st.container(border=True):
-            st.markdown("#### 🔐 Sınav Detayı")
-            _govde()
+    _pencere_ac(
+        "🔍 Sınav Detayı", _govde,
+        temizlenecek=("_detay_acik", "_detay_sonuc", "_detay_ders"),
+    )
 
 
 def _compression_note(path):
@@ -400,6 +648,28 @@ def _pdf_page_image(path, mtime_ns, page_num, dpi=130):
     return buf.getvalue()
 
 
+def _yenile(sadece_bolum=True):
+    """Ekrani yeniler.
+
+    ONEMLI - HIZ: Streamlit'te normalde tek bir dugmeye basmak SAYFANIN
+    TAMAMINI bastan calistirir; yani PDF sayfasini cevirmek optik formu da,
+    sayaclari da, veritabani sorgularini da yeniden yaptiriyordu. Streamlit'in
+    'fragment' (parca) ozelligi ile artik sadece ilgili parca yenileniyor.
+    Eski Streamlit surumlerinde bu ozellik yoksa eski davranisa donuluyor."""
+    if sadece_bolum:
+        try:
+            st.rerun(scope="fragment")
+        except Exception:
+            pass
+    st.rerun()
+
+
+def _fragman(f):
+    """Bir fonksiyonu 'bagimsiz yenilenebilir parca' haline getirir."""
+    frag = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+    return frag(f) if frag else f
+
+
 def show_pdf(path, height=780):
     """PDF'i SAYFA SAYFA RESIM olarak gosterir; ogrenci 'Onceki/Sonraki'
     ile gezinir ya da dogrudan sayfa numarasi girer. Boylece PDF'i ve
@@ -428,12 +698,12 @@ def show_pdf(path, height=780):
             if st.button("◀ Önceki", key=f"prev_{where}_{path}", use_container_width=True,
                          disabled=cur <= 0):
                 st.session_state[state_key] = cur - 1
-                st.rerun()
+                _yenile()
         with nav3:
             if st.button("Sonraki ▶", key=f"next_{where}_{path}", use_container_width=True,
                          disabled=cur >= page_count - 1):
                 st.session_state[state_key] = cur + 1
-                st.rerun()
+                _yenile()
         with nav2:
             # ÖNEMLİ: key'in içine geçerli sayfa numarası eklendi. Aksi halde
             # Streamlit, "Önceki/Sonraki" ile sayfa değiştiğinde bu widget'ın
@@ -449,7 +719,7 @@ def show_pdf(path, height=780):
             )
             if new_page - 1 != cur:
                 st.session_state[state_key] = new_page - 1
-                st.rerun()
+                _yenile()
 
     _nav_row("top")
 
@@ -475,6 +745,187 @@ def show_pdf(path, height=780):
             use_container_width=True,
             key=f"dl_{path}",
         )
+
+
+@_fragman
+def _pdf_bolumu(pdf_path, baslik, height=780):
+    """Kitapcik gosterimi -- kendi basina yenilenen bagimsiz bir parca.
+
+    Boylece 'Sonraki sayfa' dendiginde optik form, sayaclar ve veritabani
+    sorgulari yeniden calismiyor; sadece PDF resmi degisiyor."""
+    st.subheader(baslik)
+    if not pdf_path or not os.path.exists(pdf_path):
+        st.error(
+            "PDF dosyası sunucuda bulunamadı. Bu deneme muhtemelen bir önceki "
+            "yayına almadan (deploy) kalan bir kayıt; admin panelinden silip "
+            "yeniden eklemeniz gerekebilir."
+        )
+        return
+    if os.path.getsize(pdf_path) == 0:
+        st.error("PDF dosyası boş (0 byte) kaydedilmiş. Denemeyi silip yeniden eklemeniz gerekiyor.")
+        return
+    try:
+        show_pdf(pdf_path, height=height)
+    except Exception as e:
+        st.error(f"PDF gösterilirken bir hata oluştu: {e}")
+
+
+@_fragman
+def _optik_form(exam_id, attempt_no, student_name, aktif_yapi, aktif_anahtar, ikinci_sans):
+    """Optik form -- kendi basina yenilenen bagimsiz bir parca.
+
+    ONEMLI - HIZ: Her sik isaretlemesi eskiden SAYFANIN TAMAMINI yeniden
+    calistiriyordu: kitapcik resmi, sayaclar, deneme listesi, hatta gizli
+    duran diger sekmeler bile. 40 soruluk bir testte bu, 40 kez gereksiz
+    tam yenileme demekti. 'Parca' haline getirildigi icin artik sik
+    isaretlendiginde SADECE bu form yeniden ciziliyor."""
+    # ---- Bu deneme numarası henüz bitirilmemiş: formu göster ----
+    st.subheader("📝 Optik Form")
+    if ikinci_sans:
+        _ikinci_n = sum(
+            m["count"] for b in aktif_yapi.values() for m in b.values()
+        )
+        st.info(
+            f"🎯 **İkinci şans turu** — sadece daha önce yanlış yaptığın veya boş "
+            f"bıraktığın **{_ikinci_n} soru** soruluyor. Soru numaraları "
+            f"kitapçıktakiyle aynı."
+        )
+    if student_name:
+        st.caption(
+            "İşaretlediğiniz cevaplar otomatik kaydedilir; sayfa kapanırsa veya "
+            "internet kesilirse tekrar açtığınızda kaldığınız yerden devam edebilirsiniz."
+        )
+    else:
+        st.warning(
+            "Şu an kimse giriş yapmadığı için sonuç KAYDEDİLEMEZ. Soldaki menüden "
+            "giriş yapın; işaretlediğiniz cevaplar kaybolmaz, giriş yaptıktan sonra "
+            "olduğu gibi durmaya devam eder."
+        )
+
+    # ÖNEMLİ - CEVAP KAYBI: Öğrenci giriş yapmadan işaretlediği
+    # cevaplar veritabanına yazılamıyordu ve giriş yapıldığı anda
+    # kayboluyordu. Artık cevaplar giriş durumundan BAĞIMSIZ olarak
+    # her durumda oturum belleğinde de tutuluyor; giriş yapılınca
+    # oradan geri yükleniyor.
+    buf_key = f"_ans_buf_{exam_id}_{attempt_no}"
+    saved = (
+        st.session_state.get(buf_key)
+        or db.load_progress(exam_id, student_name, attempt_no)
+        or {}
+    )
+
+    # "İkinci şans" modunda yapı, sadece yanlış yapılan soruları
+    # içeren küçültülmüş sürümdür (aktif_yapi); normal turda ise
+    # denemenin kendi yapısıdır.
+    all_subjects = [
+        (section, subject)
+        for section, subjects in aktif_yapi.items()
+        for subject in subjects
+    ]
+    user_answers = {section: {} for section in aktif_yapi}
+    options = ["A", "B", "C", "D", "Boş"]
+
+    # PDF görüntüleyici ile aynı yükseklikte, kaydırılabilir bir
+    # kutu içinde gösteriliyor -- böylece PDF bittiğinde Optik
+    # Form aşağıya doğru uzayıp gitmiyor, ikisi de aynı boyda
+    # kalıp kendi içinde kayıyor.
+    with st.container(height=780, border=True):
+        subject_tabs = st.tabs([s for _, s in all_subjects])
+        for (section, subject), stab in zip(all_subjects, subject_tabs):
+            with stab:
+                _meta = aktif_yapi[section][subject]
+                count = _meta["count"]
+                # ÖNEMLİ - OPTİK FORM PDF İLE AYNI NUMARALARI
+                # GÖSTERİR: Soru bankasından alınan bazı testlerin
+                # kitaptaki ilk sayfası olmadığı için sorular 1'den
+                # değil, örneğin 4'ten başlar. Böyle testlerde
+                # "numbers" alanında sayfadaki GERÇEK soru
+                # numaraları durur ve optik form da "Soru 4, 5, 6, 7"
+                # diye devam eder -- yoksa çocuk PDF'te 4. soruyu
+                # okurken formda 1. soruyu işaretler ve her şey
+                # kayar. "numbers" yoksa normal 1, 2, 3... kullanılır.
+                numaralar = _meta.get("numbers") or list(range(1, count + 1))
+                saved_subject = saved.get(section, {}).get(subject, [])
+                if numaralar and numaralar[0] != 1:
+                    st.caption(
+                        f"ℹ️ Bu testin soruları kitapçıkta **{numaralar[0]}. sorudan** "
+                        f"başlıyor; aşağıdaki numaralar PDF'tekilerle birebir aynıdır."
+                    )
+                answers = []
+                for _sira, _soru_no in enumerate(numaralar):
+                    prev = saved_subject[_sira] if _sira < len(saved_subject) else "Boş"
+                    default_index = options.index(prev) if prev in options else 4
+                    ans = st.radio(
+                        f"{subject} - Soru {_soru_no}",
+                        options,
+                        index=default_index,
+                        horizontal=True,
+                        key=f"ans_{exam_id}_{attempt_no}_{subject}_{_soru_no}",
+                    )
+                    answers.append(ans)
+                user_answers[section][subject] = answers
+
+    # Giriş yapılmış olsun ya da olmasın, cevaplar her zaman
+    # oturum belleğine yazılır (bkz. yukarıdaki buf_key notu).
+    st.session_state[buf_key] = user_answers
+    # ÖNEMLİ - HIZ: İlerleme her ekran yenilemesinde veritabanına
+    # yazılıyordu. Ama ekran, cevap değişmeden de yenileniyor
+    # (sayfa çevirme, görünüm değiştirme...). Boşuna yazmak hem
+    # Frankfurt'a fazladan gidiş-dönüş, hem de her yazma okuma
+    # önbelleğini sıfırladığı için tüm sayfayı yeniden sorgulatıyordu.
+    # Artık sadece cevaplar GERÇEKTEN değiştiyse yazılıyor.
+    _son_key = f"_son_kayit_{exam_id}_{attempt_no}"
+    if student_name and st.session_state.get(_son_key) != user_answers:
+        db.save_progress(exam_id, student_name, attempt_no, user_answers)
+        st.session_state[_son_key] = json.loads(json.dumps(user_answers))
+
+    # ---- İlerleme sayacı: kaç soru işaretlendi / toplam kaç soru ----
+    _total_q = sum(
+        aktif_yapi[sec][sub]["count"] for sec, sub in all_subjects
+    )
+    _done_q = sum(
+        1
+        for sec, sub in all_subjects
+        for a in user_answers[sec][sub]
+        if a != "Boş"
+    )
+    _pct = _done_q / _total_q if _total_q else 0
+    st.progress(
+        _pct,
+        text=f"**{_done_q} / {_total_q} soru işaretlendi**  ·  %{round(_pct * 100)}",
+    )
+    if _done_q < _total_q:
+        st.caption(f"Kalan: {_total_q - _done_q} soru")
+
+    submitted = st.button(
+        "✅ Sınavı Bitir ve Puanla",
+        type="primary",
+        use_container_width=True,
+        key=f"submit_{exam_id}_{attempt_no}",
+    )
+
+    if submitted and not student_name:
+        st.error(
+            "Sonuç kaydedilemedi: önce soldaki menüden giriş yapmanız gerekiyor. "
+            "**İşaretlediğiniz cevaplar duruyor** — giriş yaptıktan sonra bu düğmeye "
+            "tekrar basmanız yeterli."
+        )
+    elif submitted:
+        per_subject, total_net, weighted_score = scoring.score_exam(
+            user_answers, aktif_anahtar, aktif_yapi
+        )
+        answers_detail = scoring.build_answer_detail(
+            user_answers, aktif_anahtar, aktif_yapi
+        )
+        db.add_result(
+            exam_id, student_name, per_subject, total_net,
+            weighted_score, answers_detail=answers_detail, attempt_no=attempt_no,
+            mode="yanlis" if ikinci_sans else "tam",
+        )
+        db.clear_progress(exam_id, student_name, attempt_no)
+        st.session_state.pop(buf_key, None)
+        st.success("Sınav tamamlandı! Sonuçlarınız kaydedildi.")
+        st.rerun()
 
 
 def pdf_link_button(path, label="🔓 Orijinal PDF (cevap anahtarlı)"):
@@ -567,6 +1018,50 @@ def inject_css():
                 min-width: 100% !important; flex: 1 1 100% !important;
             }
             .block-container {padding-left: 0.8rem; padding-right: 0.8rem;}
+
+            /* ÖNEMLİ - TABLETTE "LİSTE AŞAĞIYA DOĞRU UZAYIP GİDİYOR" SORUNU:
+               Yukarıdaki kural, DAR ekranda yan yana duran her şeyi alt alta
+               diziyor. Bu, PDF ile optik form için doğru; ama sayaç kutuları
+               ve rapor listesindeki tek satırlık kayıtlar için felaketti --
+               4 sayaç 4 ayrı satır, her sınav kaydı 4 ayrı satır oluyor,
+               sayfa metrelerce uzuyordu. Aşağıdaki iki kural bu iki yeri
+               kuraldan MUAF tutar. */
+            div[data-testid="stColumn"]:has(div[data-testid="stMetric"]) {
+                min-width: 46% !important; flex: 1 1 46% !important;
+            }
+            /* NOT: Asagidaki secicilerin uzun olmasinin sebebi, yukaridaki
+               "hepsini alt alta diz" kuralindan DAHA BELIRGIN olmasi
+               gerekmesidir; aksi halde tarayici o kurali uygular. */
+            /* Esit genislikte, dar ekranda da yan yana kalan dugme satiri */
+            .st-key-lgs_satir div[data-testid="stHorizontalBlock"] {
+                flex-wrap: nowrap !important;
+            }
+            .st-key-lgs_satir div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+                min-width: 0 !important; flex: 1 1 0 !important;
+            }
+            .st-key-lgs_kompakt div[data-testid="stHorizontalBlock"] {
+                flex-wrap: nowrap !important;
+            }
+            .st-key-lgs_kompakt div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+                min-width: 0 !important;
+            }
+            .st-key-lgs_kompakt div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(1) {
+                flex: 0 0 9% !important;
+            }
+            .st-key-lgs_kompakt div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(2) {
+                flex: 1 1 45% !important;
+            }
+            .st-key-lgs_kompakt div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(3) {
+                flex: 0 0 16% !important;
+            }
+            .st-key-lgs_kompakt div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(4) {
+                flex: 0 0 28% !important;
+            }
+        }
+        /* Rapor listesindeki satırlar sıkışık ve okunaklı dursun */
+        .st-key-lgs_kompakt div[data-testid="stColumn"] {padding-top: 0 !important;}
+        .st-key-lgs_kompakt .stButton>button {
+            padding: 0.35rem 0.6rem; font-size: 0.85rem; font-weight: 600;
         }
         /* Dar ekranda ders sonuc kutulari da alt alta rahat sigsin */
         @media (max-width: 640px) {
@@ -917,14 +1412,44 @@ elle kontrol etmeye gerek yok.
         )
     st.stop()
 
-tab_names = ["📱 Sınav Çöz", "📊 Gelişim Raporum"]
+# =====================================================================
+#  BÖLÜM SEÇİMİ  (eskiden st.tabs idi)
+# =====================================================================
+# ÖNEMLİ - YAVAŞLIĞIN GERİYE KALAN BÜYÜK SEBEBİ BUYDU:
+# Streamlit'in sekmeleri (st.tabs) görsel bir hiledir: ekranda tek bir
+# sekme görünse de, HER ekran yenilemesinde BÜTÜN sekmelerin içeriği
+# baştan hesaplanır. Yani öğrenci optik formda tek bir şıkka dokunduğunda,
+# "Gelişim Raporum" ve "Admin Paneli" de sessizce yeniden çiziliyor,
+# veritabanına onlarca gereksiz sorgu gidiyordu.
+# Artık bölümler arasında geçiş bir düğme seridi ile yapılıyor ve
+# YALNIZCA seçili bölüm hesaplanıyor.
+SEK_SINAV, SEK_RAPOR, SEK_ADMIN = "📱 Sınav Çöz", "📊 Gelişim Raporum", "⚙️ Admin Paneli"
+bolumler = [SEK_SINAV, SEK_RAPOR]
 if st.session_state.is_admin:
-    tab_names.append("⚙️ Admin Paneli")
-tabs = st.tabs(tab_names)
+    bolumler.append(SEK_ADMIN)
+if st.session_state.get("_aktif_bolum") not in bolumler:
+    st.session_state["_aktif_bolum"] = SEK_SINAV
+
+_segment = getattr(st, "segmented_control", None)
+_secim = None
+if _segment is not None:
+    try:
+        _secim = _segment(
+            "Bölüm", bolumler, key="_aktif_bolum", label_visibility="collapsed",
+        )
+    except Exception:
+        _segment = None
+if _segment is None:
+    _secim = st.radio(
+        "Bölüm", bolumler, key="_aktif_bolum",
+        horizontal=True, label_visibility="collapsed",
+    )
+aktif_bolum = _secim or st.session_state.get("_aktif_bolum") or SEK_SINAV
+st.divider()
 
 
 # ================================================================= TAB: SINAV ÇÖZ
-with tabs[0]:
+if aktif_bolum == SEK_SINAV:
     st.markdown("### 📱 Sınav Çöz")
 
     # ---- Sayaçlar: sistemde ne var, öğrenci ne kadarını çözmüş ----
@@ -933,10 +1458,18 @@ with tabs[0]:
         st.warning(_ist_hata)
         _ist = {"toplam_deneme": 0, "toplam_soru": 0, "toplam_sonuc": 0,
                 "ogrenci_sayisi": 0, "kategoriler": {}}
-    _benim = (
-        len(db.get_results(student_name=st.session_state.student_name))
-        if st.session_state.student_name else 0
+    _benim_sonuclar = (
+        db.get_results(student_name=st.session_state.student_name)
+        if st.session_state.student_name else []
     )
+    _benim = len(_benim_sonuclar)
+    # Hangi denemeyi çözmüş? (aşağıdaki listede ✅ ile işaretlenecek)
+    _cozulmus = {}
+    for _r in _benim_sonuclar:
+        _k = _cozulmus.setdefault(_r["exam_id"], {"adet": 0, "en_iyi": None})
+        _k["adet"] += 1
+        if _k["en_iyi"] is None or (_r["total_net"] or 0) > _k["en_iyi"]:
+            _k["en_iyi"] = _r["total_net"] or 0
     _s1, _s2, _s3, _s4 = st.columns(4)
     _s1.metric("📚 Toplam Deneme/Test", _ist["toplam_deneme"])
     _s2.metric("❓ Toplam Soru", _ist["toplam_soru"])
@@ -973,10 +1506,26 @@ with tabs[0]:
         _cat_index = categories.index(_cat_prev) if _cat_prev in categories else 0
         selected_cat = st.selectbox("Kategori", categories, index=_cat_index, key="solve_cat")
     st.session_state["_solve_cat_val"] = selected_cat
-    exams = db.get_exams(category=selected_cat)
+    # ÖNEMLİ - LİSTE SIRALAMASI: Denemeler veritabanından "en son eklenen
+    # en üstte" sırasıyla geliyordu; bu yüzden liste "Test 39, Test 38..."
+    # diye TERSTEN başlıyor, üstelik "Test 10" ile "Test 9" düz metin
+    # karşılaştırıldığı için sıra karışıyordu. Artık başlıktaki sayılar
+    # gerçek sayı olarak okunup 1'den itibaren küçükten büyüğe diziliyor.
+    exams = sorted(db.get_exams(category=selected_cat), key=lambda e: _dogal_sira(e["title"]))
     with col_b:
         if exams:
             exam_titles = {e["id"]: e["title"] for e in exams}
+
+            def _deneme_etiketi(x):
+                """Liste yazısı: çözülmüş denemelerin başında ✅ ve en iyi net."""
+                if x is None:
+                    return "— Bir deneme seçin —"
+                _bilgi = _cozulmus.get(x)
+                if not _bilgi:
+                    return f"⬜ {exam_titles[x]}"
+                _kez = "" if _bilgi["adet"] == 1 else f" ×{_bilgi['adet']}"
+                return f"✅ {exam_titles[x]}  ·  net {_bilgi['en_iyi']}{_kez}"
+
             # Sayfa açılır açılmaz otomatik olarak bir sınavın içine
             # düşülmesin diye başta hiçbir deneme seçili gelmiyor; öğrenci
             # bilinçli olarak bir deneme seçmeden PDF/Optik Form görünmüyor.
@@ -987,19 +1536,32 @@ with tabs[0]:
                 "Çözmek İstediğiniz Denemeyi Seçin",
                 options,
                 index=_ex_index,
-                format_func=lambda x: "— Bir deneme seçin —" if x is None else exam_titles[x],
+                format_func=_deneme_etiketi,
                 key="solve_exam",
+                help="✅ işaretli olanları daha önce çözdün.",
             )
             st.session_state["_solve_exam_val"] = selected_exam_id
+            _cz = len([1 for x in options if x is not None and x in _cozulmus])
+            st.caption(
+                f"Bu bölümde **{len(exams)}** test var; **{_cz}** tanesini çözdün, "
+                f"**{len(exams) - _cz}** tanesi duruyor."
+            )
         else:
             selected_exam_id = None
             st.info("Bu kategoride henüz bir deneme yok. Admin panelinden ekleyin.")
 
+    # ÖNEMLİ - "BASMADIĞIM HALDE SONUÇ PENCERESİ AÇILIYOR" HATASI:
+    # Başka bir teste geçildiğinde, bir önceki testte açılmış olan sonuç
+    # penceresinin işareti oturum belleğinde kalıyor ve yeni testte de
+    # (ESKİ testin sonucuyla) açılıyordu. Test değişince artık siliniyor.
+    if st.session_state.get("_son_secili_sinav") != selected_exam_id:
+        st.session_state["_son_secili_sinav"] = selected_exam_id
+        st.session_state.pop("_ozet_sonuc", None)
+
     # Büyük pencerede sonuç özeti istendiyse burada açılır.
     if st.session_state.get("_ozet_sonuc"):
         _oz = next(
-            (x for x in db.get_results(student_name=st.session_state.student_name)
-             if x["id"] == st.session_state["_ozet_sonuc"]),
+            (x for x in _benim_sonuclar if x["id"] == st.session_state["_ozet_sonuc"]),
             None,
         )
         if _oz:
@@ -1047,11 +1609,52 @@ with tabs[0]:
         # denemeyi çözmeye başlamış ya da bitirmişse, deneme numarasını
         # veritabanından öğreniyoruz -- böylece sayfa yeniden açıldığında
         # sıfırdan boş bir form yerine kaldığı yer / sonuç gösterilir.
-        if selected_exam_id not in st.session_state.attempt:
-            st.session_state.attempt[selected_exam_id] = db.get_current_attempt_no(
-                selected_exam_id, student_name
-            )
+        # ÖNEMLİ: Eskiden bu numara oturumda BİR KEZ belirleniyordu. Öğrenci
+        # başka bir cihazdan (ya da başka bir sekmeden) yeni bir tur çözmüş
+        # olsa bile, bu oturum hâlâ ESKİ turu gösteriyordu -- "testin her
+        # seferinde ilk çözdüğüm bilgisi geliyor" şikâyetinin sebeplerinden
+        # biri buydu. Artık veritabanındaki tur numarası daha büyükse ona
+        # güncelleniyor; yeni başlanmış (henüz kaydedilmemiş) bir tur varsa
+        # o korunuyor.
+        _db_tur = db.get_current_attempt_no(selected_exam_id, student_name)
+        _oturum_tur = st.session_state.attempt.get(selected_exam_id)
+        if _oturum_tur is None or _oturum_tur < _db_tur:
+            st.session_state.attempt[selected_exam_id] = _db_tur
         attempt_no = st.session_state.attempt[selected_exam_id]
+
+        # ---- Tur seçici: bu denemeyi birden çok kez çözdüyse hangisi? ----
+        # Öğrenci geriye dönüp önceki turlarına da bakabilsin, istediği
+        # turdan "ikinci şans"a geçebilsin diye.
+        _bu_sinav_sonuclari = sorted(
+            [x for x in _benim_sonuclar if x["exam_id"] == selected_exam_id],
+            key=lambda x: (x.get("attempt_no") or 0),
+        )
+        if len(_bu_sinav_sonuclari) > 1:
+            _tur_secenekleri = [x.get("attempt_no") or 0 for x in _bu_sinav_sonuclari]
+            if attempt_no not in _tur_secenekleri:
+                _tur_secenekleri.append(attempt_no)
+                _tur_secenekleri.sort()
+            _etiket = {}
+            for _i, _no in enumerate(_tur_secenekleri):
+                _kayit = next(
+                    (x for x in _bu_sinav_sonuclari if (x.get("attempt_no") or 0) == _no), None
+                )
+                if _kayit is None:
+                    _etiket[_no] = f"{_i + 1}. tur (devam ediyor)"
+                elif _kayit.get("mode") == "yanlis":
+                    _etiket[_no] = f"{_i + 1}. tur · 🎯 ikinci şans · net {_kayit['total_net']}"
+                else:
+                    _etiket[_no] = f"{_i + 1}. tur · 📝 tam sınav · net {_kayit['total_net']}"
+            _yeni_tur = st.selectbox(
+                "🔁 Bu denemeyi birden çok kez çözdün — hangi turu görmek istersin?",
+                _tur_secenekleri,
+                index=_tur_secenekleri.index(attempt_no),
+                format_func=lambda n: _etiket.get(n, str(n)),
+                key=f"_tur_sec_{selected_exam_id}",
+            )
+            if _yeni_tur != attempt_no:
+                st.session_state.attempt[selected_exam_id] = _yeni_tur
+                attempt_no = _yeni_tur
 
         # "İkinci şans" modu: bu deneme numarasında SADECE önceki yanlış/boş
         # sorular soruluyorsa, hangi sorular olduğu veritabanında saklanır.
@@ -1086,21 +1689,7 @@ with tabs[0]:
             col_pdf, col_form = st.columns([6, 4])
 
         with col_pdf:
-            st.subheader(exam["title"])
-            pdf_path = exam["pdf_path"]
-            if not os.path.exists(pdf_path):
-                st.error(
-                    "PDF dosyası sunucuda bulunamadı. Bu deneme muhtemelen bir önceki "
-                    "yayına almadan (deploy) kalan bir kayıt; admin panelinden silip "
-                    "yeniden eklemeniz gerekebilir."
-                )
-            elif os.path.getsize(pdf_path) == 0:
-                st.error("PDF dosyası boş (0 byte) kaydedilmiş. Denemeyi silip yeniden eklemeniz gerekiyor.")
-            else:
-                try:
-                    show_pdf(pdf_path)
-                except Exception as e:
-                    st.error(f"PDF gösterilirken bir hata oluştu: {e}")
+            _pdf_bolumu(exam["pdf_path"], exam["title"])
 
         with col_form:
             if existing_result:
@@ -1180,157 +1769,14 @@ with tabs[0]:
                     st.session_state.attempt[selected_exam_id] = attempt_no + 1
                     st.rerun()
             else:
-                # ---- Bu deneme numarası henüz bitirilmemiş: formu göster ----
-                st.subheader("📝 Optik Form")
-                if _wrong_sel:
-                    _ikinci_n = sum(
-                        m["count"] for b in aktif_yapi.values() for m in b.values()
-                    )
-                    st.info(
-                        f"🎯 **İkinci şans turu** — sadece daha önce yanlış yaptığın veya boş "
-                        f"bıraktığın **{_ikinci_n} soru** soruluyor. Soru numaraları "
-                        f"kitapçıktakiyle aynı."
-                    )
-                if student_name:
-                    st.caption(
-                        "İşaretlediğiniz cevaplar otomatik kaydedilir; sayfa kapanırsa veya "
-                        "internet kesilirse tekrar açtığınızda kaldığınız yerden devam edebilirsiniz."
-                    )
-                else:
-                    st.warning(
-                        "Şu an kimse giriş yapmadığı için sonuç KAYDEDİLEMEZ. Soldaki menüden "
-                        "giriş yapın; işaretlediğiniz cevaplar kaybolmaz, giriş yaptıktan sonra "
-                        "olduğu gibi durmaya devam eder."
-                    )
-
-                # ÖNEMLİ - CEVAP KAYBI: Öğrenci giriş yapmadan işaretlediği
-                # cevaplar veritabanına yazılamıyordu ve giriş yapıldığı anda
-                # kayboluyordu. Artık cevaplar giriş durumundan BAĞIMSIZ olarak
-                # her durumda oturum belleğinde de tutuluyor; giriş yapılınca
-                # oradan geri yükleniyor.
-                buf_key = f"_ans_buf_{selected_exam_id}_{attempt_no}"
-                saved = (
-                    st.session_state.get(buf_key)
-                    or db.load_progress(selected_exam_id, student_name, attempt_no)
-                    or {}
+                _optik_form(
+                    selected_exam_id, attempt_no, student_name,
+                    aktif_yapi, aktif_anahtar, bool(_wrong_sel),
                 )
-
-                # "İkinci şans" modunda yapı, sadece yanlış yapılan soruları
-                # içeren küçültülmüş sürümdür (aktif_yapi); normal turda ise
-                # denemenin kendi yapısıdır.
-                all_subjects = [
-                    (section, subject)
-                    for section, subjects in aktif_yapi.items()
-                    for subject in subjects
-                ]
-                user_answers = {section: {} for section in aktif_yapi}
-                options = ["A", "B", "C", "D", "Boş"]
-
-                # PDF görüntüleyici ile aynı yükseklikte, kaydırılabilir bir
-                # kutu içinde gösteriliyor -- böylece PDF bittiğinde Optik
-                # Form aşağıya doğru uzayıp gitmiyor, ikisi de aynı boyda
-                # kalıp kendi içinde kayıyor.
-                with st.container(height=780, border=True):
-                    subject_tabs = st.tabs([s for _, s in all_subjects])
-                    for (section, subject), stab in zip(all_subjects, subject_tabs):
-                        with stab:
-                            _meta = aktif_yapi[section][subject]
-                            count = _meta["count"]
-                            # ÖNEMLİ - OPTİK FORM PDF İLE AYNI NUMARALARI
-                            # GÖSTERİR: Soru bankasından alınan bazı testlerin
-                            # kitaptaki ilk sayfası olmadığı için sorular 1'den
-                            # değil, örneğin 4'ten başlar. Böyle testlerde
-                            # "numbers" alanında sayfadaki GERÇEK soru
-                            # numaraları durur ve optik form da "Soru 4, 5, 6, 7"
-                            # diye devam eder -- yoksa çocuk PDF'te 4. soruyu
-                            # okurken formda 1. soruyu işaretler ve her şey
-                            # kayar. "numbers" yoksa normal 1, 2, 3... kullanılır.
-                            numaralar = _meta.get("numbers") or list(range(1, count + 1))
-                            saved_subject = saved.get(section, {}).get(subject, [])
-                            if numaralar and numaralar[0] != 1:
-                                st.caption(
-                                    f"ℹ️ Bu testin soruları kitapçıkta **{numaralar[0]}. sorudan** "
-                                    f"başlıyor; aşağıdaki numaralar PDF'tekilerle birebir aynıdır."
-                                )
-                            answers = []
-                            for _sira, _soru_no in enumerate(numaralar):
-                                prev = saved_subject[_sira] if _sira < len(saved_subject) else "Boş"
-                                default_index = options.index(prev) if prev in options else 4
-                                ans = st.radio(
-                                    f"{subject} - Soru {_soru_no}",
-                                    options,
-                                    index=default_index,
-                                    horizontal=True,
-                                    key=f"ans_{selected_exam_id}_{attempt_no}_{subject}_{_soru_no}",
-                                )
-                                answers.append(ans)
-                            user_answers[section][subject] = answers
-
-                # Giriş yapılmış olsun ya da olmasın, cevaplar her zaman
-                # oturum belleğine yazılır (bkz. yukarıdaki buf_key notu).
-                st.session_state[buf_key] = user_answers
-                # ÖNEMLİ - HIZ: İlerleme her ekran yenilemesinde veritabanına
-                # yazılıyordu. Ama ekran, cevap değişmeden de yenileniyor
-                # (sayfa çevirme, görünüm değiştirme...). Boşuna yazmak hem
-                # Frankfurt'a fazladan gidiş-dönüş, hem de her yazma okuma
-                # önbelleğini sıfırladığı için tüm sayfayı yeniden sorgulatıyordu.
-                # Artık sadece cevaplar GERÇEKTEN değiştiyse yazılıyor.
-                _son_key = f"_son_kayit_{selected_exam_id}_{attempt_no}"
-                if student_name and st.session_state.get(_son_key) != user_answers:
-                    db.save_progress(selected_exam_id, student_name, attempt_no, user_answers)
-                    st.session_state[_son_key] = json.loads(json.dumps(user_answers))
-
-                # ---- İlerleme sayacı: kaç soru işaretlendi / toplam kaç soru ----
-                _total_q = sum(
-                    aktif_yapi[sec][sub]["count"] for sec, sub in all_subjects
-                )
-                _done_q = sum(
-                    1
-                    for sec, sub in all_subjects
-                    for a in user_answers[sec][sub]
-                    if a != "Boş"
-                )
-                _pct = _done_q / _total_q if _total_q else 0
-                st.progress(
-                    _pct,
-                    text=f"**{_done_q} / {_total_q} soru işaretlendi**  ·  %{round(_pct * 100)}",
-                )
-                if _done_q < _total_q:
-                    st.caption(f"Kalan: {_total_q - _done_q} soru")
-
-                submitted = st.button(
-                    "✅ Sınavı Bitir ve Puanla",
-                    type="primary",
-                    use_container_width=True,
-                    key=f"submit_{selected_exam_id}_{attempt_no}",
-                )
-
-                if submitted and not student_name:
-                    st.error(
-                        "Sonuç kaydedilemedi: önce soldaki menüden giriş yapmanız gerekiyor. "
-                        "**İşaretlediğiniz cevaplar duruyor** — giriş yaptıktan sonra bu düğmeye "
-                        "tekrar basmanız yeterli."
-                    )
-                elif submitted:
-                    per_subject, total_net, weighted_score = scoring.score_exam(
-                        user_answers, aktif_anahtar, aktif_yapi
-                    )
-                    answers_detail = scoring.build_answer_detail(
-                        user_answers, aktif_anahtar, aktif_yapi
-                    )
-                    db.add_result(
-                        selected_exam_id, student_name, per_subject, total_net,
-                        weighted_score, answers_detail=answers_detail, attempt_no=attempt_no,
-                        mode="yanlis" if _wrong_sel else "tam",
-                    )
-                    db.clear_progress(selected_exam_id, student_name, attempt_no)
-                    st.session_state.pop(buf_key, None)
-                    st.success("Sınav tamamlandı! Sonuçlarınız kaydedildi.")
-                    st.rerun()
 
 
 # ================================================================= TAB: GELİŞİM RAPORU
-with tabs[1]:
+if aktif_bolum == SEK_RAPOR:
     st.subheader("📊 Gelişim Raporum")
     student = st.session_state.student_name
     if not student:
@@ -1340,110 +1786,128 @@ with tabs[1]:
         if not results:
             st.info("Henüz çözülmüş bir sınav yok.")
         else:
-            df = pd.DataFrame(
-                [
-                    {
-                        "🗓️ Tarih": _tarih_bicimle(r["created_at"]),
-                        "Sınav": r["exam_title"],
-                        "Kategori": r["category"],
-                        "Tür": "🎯 İkinci şans" if r.get("mode") == "yanlis" else "📝 Tam sınav",
-                        "Toplam Net": r["total_net"],
-                        "Ağırlıklı Puan": r["weighted_score"],
-                    }
-                    for r in results
-                ]
-            )
-            df = df.rename(columns={"🗓️ Tarih": "🗓️ Sınav Tarihi"})
-            _tablo(df)
-            _tam = [r for r in results if r.get("mode") != "yanlis"]
-            if len(_tam) >= 2:
-                _cd = pd.DataFrame(
-                    [{"Tarih": _tarih_bicimle(r["created_at"]), "Toplam Net": r["total_net"]}
-                     for r in _tam]
-                ).set_index("Tarih").sort_index()
-                st.line_chart(_cd)
+            # En son çözülen en üstte dursun.
+            results = sorted(results, key=lambda x: str(x.get("created_at") or ""), reverse=True)
 
-            # ---- İLK ÇÖZÜM vs SONRAKİLER karşılaştırması ----
-            st.divider()
-            st.markdown("### 📈 İlk Çözüm / Sonraki Çözümler")
-            _gruplar = {}
-            for r in results:
-                if r.get("mode") == "yanlis":
-                    continue  # ikinci şans turları net karşılaştırmasına girmez
-                _gruplar.setdefault(r["exam_id"], []).append(r)
-            _satirlar = []
-            for _eid, _rs in _gruplar.items():
-                _rs = sorted(_rs, key=lambda x: x["created_at"])
-                _ilk, _son = _rs[0], _rs[-1]
-                _satirlar.append({
-                    "Sınav": _ilk["exam_title"],
-                    "Çözüm Sayısı": len(_rs),
-                    "🗓️ İlk Çözüm": _tarih_bicimle(_ilk["created_at"]),
-                    "İlk Net": _ilk["total_net"],
-                    "🗓️ Son Çözüm": _tarih_bicimle(_son["created_at"]) if len(_rs) > 1 else "—",
-                    "Son Net": _son["total_net"] if len(_rs) > 1 else "—",
-                    "Değişim": (
-                        round(_son["total_net"] - _ilk["total_net"], 2) if len(_rs) > 1 else "—"
-                    ),
-                })
-            if _satirlar:
-                _tablo(pd.DataFrame(_satirlar))
-                _gelisen = [s for s in _satirlar if isinstance(s["Değişim"], float) and s["Değişim"] > 0]
-                if _gelisen:
-                    st.success(
-                        f"👏 {len(_gelisen)} denemede netin arttı! "
-                        f"En çok artış: **+{max(s['Değişim'] for s in _gelisen)} net**"
-                    )
-            else:
-                st.caption("Karşılaştırma için henüz yeterli çözüm yok.")
+            # ---- Üst sayaçlar ----
+            _netler = [r["total_net"] for r in results if r["total_net"] is not None]
+            _k1, _k2, _k3, _k4 = st.columns(4)
+            _k1.metric("📝 Toplam Çözüm", len(results))
+            _k2.metric("📚 Farklı Sınav", len({r["exam_id"] for r in results}))
+            _k3.metric("🏅 En Yüksek Net", max(_netler) if _netler else 0)
+            _k4.metric("📈 Ortalama Net", round(sum(_netler) / len(_netler), 2) if _netler else 0)
 
-            # ---- Sınav detayları: ders kutucuğuna basınca PIN'li pencere ----
             st.divider()
-            st.markdown("### 📋 Sınav Sonuçları")
+            # ÖNEMLİ - ESKİ TASARIMIN SORUNU: Her sınav için ekrana kocaman bir
+            # kutu çiziliyordu; 30-40 sınav çözüldüğünde sayfa metrelerce
+            # aşağıya uzuyor, aranan sınav bulunamıyordu. Artık her sınav TEK
+            # SATIR; ayrıntılar düğmeyle açılan pencerede gösteriliyor.
+            st.markdown("#### 📋 Çözdüğün Sınavlar")
             st.caption(
-                "Her sınavın ders kutucuğuna dokunarak ayrıntılı dökümü açabilirsin. "
-                "Ayrıntılı döküm **PIN kodu** ile korunuyor."
+                "Karşılaştırmak istediklerini soldaki **kutucuktan işaretle**, sonra "
+                "**📊 Seçilenleri Değerlendir**'e bas. Tek bir sınavın soru soru dökümü "
+                "için satırın sağındaki **🔍 Sınav Detayı** düğmesini kullan."
             )
-            for _ri, r in enumerate(results):
-                _tur = "🎯 İkinci şans" if r.get("mode") == "yanlis" else "📝 Tam sınav"
-                with st.container(border=True):
-                    _h1, _h2 = st.columns([3, 2])
-                    _h1.markdown(f"**{r['exam_title']}**  \n*{r['category']} · {_tur}*")
-                    _h2.markdown(
-                        f"<div style='text-align:right;'>"
-                        f"<span style='background:#1E3A8A;color:#fff;padding:5px 12px;"
-                        f"border-radius:20px;font-weight:600;font-size:0.95rem;'>"
-                        f"🗓️ {_tarih_bicimle(r['created_at'])}</span><br>"
-                        f"<span style='font-size:1.35rem;font-weight:700;color:#1E3A8A;'>"
-                        f"Net: {r['total_net']}</span></div>",
+
+            with _kutu("lgs_satir"):
+                _b1, _b2, _b3 = st.columns([2.2, 1, 1])
+                _degerlendir_basildi = _b1.button(
+                    "📊 Seçilenleri Değerlendir", type="primary", use_container_width=True,
+                    key="_dege_btn",
+                )
+                if _b2.button("Tümünü Seç", use_container_width=True, key="_hepsi_btn"):
+                    for _r in results:
+                        st.session_state[f"_secr_{_r['id']}"] = True
+                    st.rerun()
+                if _b3.button("Temizle", use_container_width=True, key="_temizle_btn"):
+                    for _r in results:
+                        st.session_state[f"_secr_{_r['id']}"] = False
+                    st.rerun()
+
+            # ---- Sınav listesi: kaydırılabilir, sabit yükseklikli kutu ----
+            # "key" verilmesinin sebebi: bu kutuya CSS ile ayrı davranabilmek
+            # (dar ekranda satırların alt alta dağılmasını engellemek).
+            _secilenler = []
+            with _kutu("lgs_kompakt", height=430, border=True):
+                for _r in results:
+                    _tur = "🎯 İkinci şans" if _r.get("mode") == "yanlis" else "📝 Tam sınav"
+                    _c0, _c1, _c2, _c3 = st.columns([0.7, 5, 1.5, 2.4])
+                    if _c0.checkbox(
+                        "seç", key=f"_secr_{_r['id']}", label_visibility="collapsed",
+                    ):
+                        _secilenler.append(_r)
+                    _c1.markdown(
+                        f"**{_r['exam_title']}**  \n"
+                        f"<span style='background:#1E3A8A;color:#fff;padding:2px 9px;"
+                        f"border-radius:14px;font-size:0.82rem;font-weight:600;'>"
+                        f"🗓️ {_tarih_bicimle(_r['created_at'])}</span> "
+                        f"<span style='color:#475569;font-size:0.85rem;'> · {_tur}</span>",
                         unsafe_allow_html=True,
                     )
-                    _ps = r["per_subject"]
-                    _bcols = st.columns(len(_ps) if _ps else 1)
-                    for _bc, (_subj, _res) in zip(_bcols, _ps.items()):
-                        if _bc.button(
-                            f"**{_subj}**\n\nNet {_res['net']}\n\n"
-                            f"✅{_res['dogru']}  ❌{_res['yanlis']}  ⬜{_res['bos']}",
-                            key=f"detbtn_{r['id']}_{_subj}",
-                            use_container_width=True,
-                        ):
-                            st.session_state["_detay_sonuc"] = r["id"]
-                            st.session_state["_detay_ders"] = _subj
-                            st.session_state["_detay_acik"] = True
-                            st.rerun()
+                    _c2.markdown(
+                        f"<div style='text-align:center;line-height:1.15;'>"
+                        f"<span style='font-size:0.75rem;color:#64748B;'>NET</span><br>"
+                        f"<span style='font-size:1.25rem;font-weight:700;color:#1E3A8A;'>"
+                        f"{_r['total_net']}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    if _c3.button("🔍 Sınav Detayı", key=f"_detbtn_{_r['id']}",
+                                  use_container_width=True):
+                        st.session_state["_detay_sonuc"] = _r["id"]
+                        st.session_state["_detay_ders"] = None
+                        st.session_state["_detay_acik"] = True
+                        st.session_state.pop("_dege_acik", None)
+                        st.rerun()
+                    st.markdown(
+                        "<hr style='margin:4px 0 8px 0;border:none;"
+                        "border-top:1px solid #E2E8F0;'>",
+                        unsafe_allow_html=True,
+                    )
 
-            # Detay penceresi (PIN korumalı)
+            if _degerlendir_basildi:
+                if _secilenler:
+                    st.session_state["_dege_ids"] = [x["id"] for x in _secilenler]
+                    st.session_state["_dege_acik"] = True
+                    st.session_state.pop("_detay_acik", None)
+                    st.rerun()
+                else:
+                    st.warning(
+                        "Önce listeden en az bir sınavı işaretleyin "
+                        "(sınav adının solundaki kutucuk)."
+                    )
+
+            # ---- Gelişim grafiği (yer kaplamasın diye kapalı gelir) ----
+            _tam = [r for r in results if r.get("mode") != "yanlis"]
+            if len(_tam) >= 2:
+                with st.expander("📈 Gelişim grafiği (net değişimi)"):
+                    _cd = pd.DataFrame(
+                        [{"Tarih": _tarih_bicimle(r["created_at"]), "Toplam Net": r["total_net"]}
+                         for r in _tam]
+                    ).set_index("Tarih").sort_index()
+                    st.line_chart(_cd)
+
+            # ---- Pencereler: bir turda sadece BİRİ açılır (bkz. _pencere_ac) ----
+            if st.session_state.get("_dege_acik"):
+                _sec_kayitlar = [
+                    x for x in results if x["id"] in (st.session_state.get("_dege_ids") or [])
+                ]
+                if _sec_kayitlar:
+                    _degerlendirme_penceresi(_sec_kayitlar)
+                else:
+                    st.session_state.pop("_dege_acik", None)
+
             if st.session_state.get("_detay_acik"):
                 _hedef = next(
                     (x for x in results if x["id"] == st.session_state.get("_detay_sonuc")), None
                 )
                 if _hedef is not None:
                     _detay_penceresi(_hedef, st.session_state.get("_detay_ders"))
-
+                else:
+                    st.session_state.pop("_detay_acik", None)
 
 # ================================================================= TAB: ADMIN
-if st.session_state.is_admin:
-    with tabs[2]:
+if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
+    with st.container():
         st.subheader("⚙️ Admin Paneli")
 
         # ---- Verilerin kalıcı olup olmadığını açıkça göster ----
@@ -2136,9 +2600,14 @@ if st.session_state.is_admin:
 
         # ---------------- Kayıtlı denemeler ----------------
         elif admin_section == "Kayıtlı Denemeler":
-            all_exams = db.get_exams()
+            # Bölüm bölüm ve test numarasına göre sıralı (1, 2, 3 ... 10, 11).
+            all_exams = sorted(
+                db.get_exams(), key=lambda e: (e["category"], _dogal_sira(e["title"]))
+            )
             if not all_exams:
                 st.info("Henüz kayıtlı deneme yok.")
+            else:
+                st.caption(f"Toplam **{len(all_exams)}** kayıtlı deneme/test var.")
             for e in all_exams:
                 c1, c2, c3, c4 = st.columns([4, 2, 1, 2])
                 c1.write(f"**{e['title']}**  ·  {e['category']}  ·  {e['source']}")
@@ -2319,9 +2788,10 @@ if st.session_state.is_admin:
         elif admin_section == "Hesap Ayarları":
             st.markdown("#### 🔐 Rapor PIN kodu")
             st.caption(
-                "Öğrenci kendi raporunda bir dersin kutucuğuna dokunduğunda, soru bazlı "
-                "döküm (hangi soruyu yanlış yaptı, doğrusu neydi) bu PIN kodu sorularak "
-                "açılır. **Boş bırakırsanız PIN sorulmaz**, döküm herkese açık olur."
+                "Öğrenci **Gelişim Raporum → 🔍 Sınav Detayı** düğmesine bastığında, soru "
+                "bazlı döküm (hangi soruyu yanlış yaptı, doğrusu neydi) bu PIN kodu "
+                "sorularak açılır. PIN bir kez girildikten sonra o oturum boyunca tekrar "
+                "sorulmaz. **Boş bırakırsanız PIN sorulmaz**, döküm herkese açık olur."
             )
             _mevcut_pin = db.get_setting("rapor_pin", "") or ""
             st.text_input(

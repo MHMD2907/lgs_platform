@@ -255,7 +255,12 @@ def is_kalici():
 #  komple temizler; böylece ekranda asla eski bilgi kalmaz.
 # =====================================================================
 _ONBELLEK = {}
-_ONBELLEK_SURESI = 20  # saniye
+# ÖNEMLİ - HIZ: Önbellek süresi 20 saniyeydi; 60 saniyeye çıkarıldı.
+# Veriyi DEĞİŞTİREN her işlem (deneme ekleme, sonuç kaydetme, öğrenci
+# ekleme...) önbelleği zaten anında temizlediği için ekranda eski bilgi
+# kalma riski yoktur; bu süre sadece "hiçbir şey değişmediyse aynı soruyu
+# Frankfurt'taki sunucuya tekrar tekrar sorma" anlamına gelir.
+_ONBELLEK_SURESI = 60  # saniye
 _onbellek_kilit = threading.Lock()
 
 
