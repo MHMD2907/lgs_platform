@@ -334,7 +334,7 @@ def _ozet_penceresi(r):
         st.markdown(
             f"**{r['exam_title']}**  ·  *{r['category']}*  \n"
             f"🗓️ **{_tarih_bicimle(r.get('created_at'))}**"
-            + ("  ·  🎯 İkinci şans turu" if r.get("mode") == "yanlis" else "")
+            + ("  ·  🎯 Yanlışları Düzeltme Turu" if r.get("mode") == "yanlis" else "")
         )
         ps = r["per_subject"]
         a1, a2, a3, a4 = st.columns(4)
@@ -387,7 +387,7 @@ def _degerlendirme_penceresi(secilenler):
             _satir.append({
                 "Sınav": r["exam_title"],
                 "🗓️ Tarih": _tarih_bicimle(r["created_at"]),
-                "Tür": "🎯 İkinci şans" if r.get("mode") == "yanlis" else "📝 Tam sınav",
+                "Tür": "🎯 Düzeltme turu" if r.get("mode") == "yanlis" else "📝 Tam sınav",
                 "Soru": s, "✅ Doğru": d, "❌ Yanlış": y, "⬜ Boş": b, "Net": net,
             })
         m1, m2, m3, m4 = st.columns(4)
@@ -399,12 +399,17 @@ def _degerlendirme_penceresi(secilenler):
             st.progress(_d / _t, text=f"Başarı oranı: **%{round(100 * _d / _t)}**")
         _tablo(pd.DataFrame(_satir))
 
-        # ---- 2) İlk çözüm / sonraki şans karşılaştırması ----
-        st.markdown("#### 🔁 İlk Çözüm / Sonraki Şans")
+        # ---- 2) İlk çözüm / düzeltme turu karşılaştırması ----
+        # ÖNEMLİ - KULLANICI İSTEĞİ: Burada eskiden sadece kuru bir tablo ve
+        # "toplam 2 soruyu düzeltmişsin" yazıyordu; ne anlama geldiği belli
+        # değildi. Artık her sınav için TAM CÜMLE kuruluyor:
+        # "25 sorunun 8'ini yanlış yapmıştın; düzeltme turunda bu 8 sorudan
+        #  5'ini doğru çözdün, 3'ü hâlâ yanlış."
+        st.markdown("#### 🔁 İlk Çözüm ve Düzeltme Turu")
         _gruplar = {}
         for r in secilenler:
             _gruplar.setdefault(r["exam_id"], []).append(r)
-        _karsilastirma = []
+        _karsilastirma, _cumleler = [], []
         for _eid, _rs in _gruplar.items():
             if len(_rs) < 2:
                 continue
@@ -412,26 +417,53 @@ def _degerlendirme_penceresi(secilenler):
             _ilk, _son = _rs[0], _rs[-1]
             _si, _di, _yi, _bi, _ni = _sonuc_sayilari(_ilk)
             _ss, _ds, _ys, _bs, _ns = _sonuc_sayilari(_son)
+            _kacirilan = _yi + _bi           # ilk turda yanlış + boş
+            _tekrar_sorulan = _ss            # düzeltme turunda sorulan soru sayısı
+            _duzelen = _ds if _son.get("mode") == "yanlis" else max(0, _kacirilan - (_ys + _bs))
+            _duzelen = min(_duzelen, _kacirilan)
             _karsilastirma.append({
                 "Sınav": _ilk["exam_title"],
-                "Tur Sayısı": len(_rs),
-                "İlk: Soru": _si, "İlk: ✅": _di, "İlk: ❌": _yi, "İlk: Net": _ni,
-                "Son: Soru": _ss, "Son: ✅": _ds, "Son: ❌": _ys, "Son: Net": _ns,
-                "Düzelttiği": max(0, _yi + _bi - (_ys + _bs)),
+                "Tur": len(_rs),
+                "İlk turda soru": _si,
+                "İlk turda ✅": _di,
+                "İlk turda ❌/⬜": _kacirilan,
+                "İlk net": _ni,
+                "Tekrar sorulan": _tekrar_sorulan,
+                "Düzelttiği": _duzelen,
+                "Hâlâ yanlış": max(0, _kacirilan - _duzelen),
             })
+            if _son.get("mode") == "yanlis":
+                _cumleler.append(
+                    f"**{_ilk['exam_title']}** — İlk turda **{_si} sorudan {_kacirilan} tanesini** "
+                    f"yanlış yaptın ya da boş bıraktın. Düzeltme turunda bu "
+                    f"**{_tekrar_sorulan} sorunun {_duzelen} tanesini doğru** çözdün"
+                    + (f", **{_kacirilan - _duzelen} tanesi hâlâ yanlış**." if _kacirilan - _duzelen
+                       else " — **hepsini düzelttin!** 🎉")
+                )
+            else:
+                _fark = round((_ns or 0) - (_ni or 0), 2)
+                _cumleler.append(
+                    f"**{_ilk['exam_title']}** — Sınavı baştan {len(_rs)} kez çözdün. "
+                    f"İlk çözümde **{_di} doğru / net {_ni}**, son çözümde "
+                    f"**{_ds} doğru / net {_ns}** yaptın "
+                    + (f"(**{_fark:+} net**)." if _fark else "(net değişmedi).")
+                )
         if _karsilastirma:
-            _tablo(pd.DataFrame(_karsilastirma))
+            for _c in _cumleler:
+                st.markdown(f"- {_c}")
+            with st.expander("📋 Aynı bilgiler tablo hâlinde"):
+                _tablo(pd.DataFrame(_karsilastirma))
             _toplam_duzelen = sum(x["Düzelttiği"] for x in _karsilastirma)
             if _toplam_duzelen:
                 st.success(
-                    f"👏 İkinci şans turlarında toplam **{_toplam_duzelen} soruyu** "
-                    f"düzeltmişsin!"
+                    f"👏 Düzeltme turlarında toplam **{_toplam_duzelen} soruyu** "
+                    f"doğruya çevirdin!"
                 )
         else:
             st.caption(
                 "Seçtiklerin arasında aynı sınavın birden fazla turu yok. "
-                "Karşılaştırma için bir sınavın hem ilk çözümünü hem de ikinci "
-                "şans turunu birlikte işaretle."
+                "Karşılaştırma için bir sınavın hem **ilk çözümünü** hem de "
+                "**düzeltme turunu** birlikte işaretle."
             )
 
         # ---- 3) Aynı gün toplamları ----
@@ -473,7 +505,7 @@ def _detay_icerigi(r, vurgu_ders=None):
     st.markdown(
         f"**{r['exam_title']}**  ·  *{r['category']}*  \n"
         f"🗓️ **{_tarih_bicimle(r.get('created_at'))}**"
-        + ("  ·  🎯 İkinci şans turu" if r.get("mode") == "yanlis" else "")
+        + ("  ·  🎯 Yanlışları Düzeltme Turu" if r.get("mode") == "yanlis" else "")
     )
     ps = r["per_subject"]
     a1, a2, a3, a4 = st.columns(4)
@@ -486,25 +518,56 @@ def _detay_icerigi(r, vurgu_ders=None):
 
     detay = r.get("answers_detail")
     if not detay:
-        st.info("Bu sonuç için soru bazlı döküm kaydedilmemiş.")
+        st.warning(
+            "Bu sonuç için soru bazlı döküm kaydedilmemiş. Soru soru döküm, "
+            "**bu güncellemeden önce çözülen** sınavlarda tutulmuyordu. Bu sınavı "
+            "yeniden çözerseniz dökümü görebilirsiniz."
+        )
         return
     dersler = [(b, d) for b, ds in detay.items() for d in ds]
-    # Tıklanan ders varsa onu başa al
     if vurgu_ders:
         dersler.sort(key=lambda x: x[1] != vurgu_ders)
+
+    # ÖNEMLİ - KULLANICI GERİ BİLDİRİMİ ("PIN girdim ama soruları göstermiyor"):
+    # Burada eskiden SADECE yanlış/boş sorular listeleniyordu. Bir derste hiç
+    # yanlış yoksa tablo hiç çizilmiyor, kullanıcı "hiçbir şey göstermiyor"
+    # diye görüyordu. Artık BÜTÜN sorular listeleniyor; isterse yalnızca
+    # yanlışlara süzebiliyor.
+    _sadece_yanlis = st.toggle(
+        "Sadece yanlış ve boş soruları göster",
+        value=False,
+        key=f"_detay_suz_{r['id']}",
+        help="Kapatırsan doğru yaptığın sorular da listelenir.",
+    )
+    _durum_yazi = {"dogru": "✅ Doğru", "yanlis": "❌ Yanlış", "bos": "⬜ Boş"}
     sekmeler = st.tabs([d for _, d in dersler])
     for (bolum, ders), sek in zip(dersler, sekmeler):
         with sek:
-            satirlar = detay[bolum][ders]
-            yanlis = [x for x in satirlar if x["durum"] != "dogru"]
-            if not yanlis:
+            satirlar = list(detay[bolum][ders] or [])
+            if not satirlar:
+                st.info(f"{ders} için soru dökümü kaydedilmemiş.")
+                continue
+            _d = sum(1 for x in satirlar if x.get("durum") == "dogru")
+            _y = sum(1 for x in satirlar if x.get("durum") == "yanlis")
+            _b = sum(1 for x in satirlar if x.get("durum") == "bos")
+            st.markdown(
+                f"**{ders}** — {len(satirlar)} soru · ✅ {_d} doğru · "
+                f"❌ {_y} yanlış · ⬜ {_b} boş"
+            )
+            gosterilecek = [x for x in satirlar if x.get("durum") != "dogru"] \
+                if _sadece_yanlis else satirlar
+            if not gosterilecek:
                 st.success(f"{ders}: tüm sorular doğru! 🎉")
                 continue
-            dfd = pd.DataFrame(yanlis).rename(columns={
-                "soru": "Soru No", "verilen": "Senin Cevabın",
-                "dogru_cevap": "Doğru Cevap", "durum": "Durum",
-            })
-            dfd["Durum"] = dfd["Durum"].map({"yanlis": "❌ Yanlış", "bos": "⬜ Boş"})
+            dfd = pd.DataFrame([
+                {
+                    "Soru No": x.get("soru"),
+                    "Senin Cevabın": (x.get("verilen") or "—").replace("Boş", "—"),
+                    "Doğru Cevap": x.get("dogru_cevap"),
+                    "Durum": _durum_yazi.get(x.get("durum"), x.get("durum")),
+                }
+                for x in gosterilecek
+            ])
             _tablo(dfd)
 
 
@@ -747,6 +810,97 @@ def show_pdf(path, height=780):
         )
 
 
+def _deneme_ekle(baslik, kategori, guvenli_yol, yapi, anahtar, source="manuel",
+                 pdf_path_original=None, source_url=None):
+    """Denemeyi kaydeder VE kitapçığın kalıcı kopyasını veritabanına yazar.
+
+    ÖNEMLİ - "PDF DOSYASI SUNUCUDA BULUNAMADI" HATASININ ASIL ÇÖZÜMÜ:
+    Streamlit'in ücretsiz bulut sunucusunda uygulamanın diski her yeniden
+    başlatmada/güncellemede SIFIRLANIYOR. Sınav kaydı kalıcı veritabanında
+    durduğu için listede görünmeye devam ediyor ama kitapçık dosyası
+    silinmiş oluyordu -- kullanıcının gördüğü "hiçbir sınava giremiyorum"
+    sorunu tam olarak buydu. Artık her deneme eklendiğinde kitapçık da
+    veritabanına yazılıyor; dosya kaybolursa oradan geri getiriliyor.
+
+    Dosya çok büyükse önce sayfaları resme çevirerek küçültülüyor
+    (ölçüldü: 20 sayfa 4,7 MB -> 1,8 MB; ekranda fark edilmiyor çünkü
+    uygulama PDF'i zaten sayfa sayfa resim olarak gösteriyor).
+
+    Döner: (exam_id, uyari_metni_or_None)"""
+    exam_id = db.add_exam(
+        baslik, kategori, guvenli_yol, yapi, anahtar,
+        source=source, pdf_path_original=pdf_path_original, source_url=source_url,
+    )
+    if not guvenli_yol or not os.path.exists(guvenli_yol):
+        return exam_id, None
+    try:
+        if os.path.getsize(guvenli_yol) > db.PDF_SAKLAMA_SINIRI:
+            parsing.gorsel_kucult(guvenli_yol, sinir=db.PDF_SAKLAMA_SINIRI)
+        with open(guvenli_yol, "rb") as f:
+            ok, mesaj = db.pdf_kaydet(exam_id, os.path.basename(guvenli_yol), f.read())
+        if not ok:
+            return exam_id, (
+                f"⚠️ **{baslik}** eklendi ama kitapçığın kalıcı kopyası saklanamadı "
+                f"({mesaj}). Sunucu yeniden başlarsa bu denemenin PDF'i kaybolabilir."
+            )
+    except Exception as e:
+        return exam_id, f"⚠️ **{baslik}**: kalıcı kopya yazılamadı ({e})."
+    return exam_id, None
+
+
+def _pdf_yolunu_hazirla(exam):
+    """Denemenin PDF'ini KESİNLİKLE kullanılabilir hâle getirir.
+
+    ÖNEMLİ - "PDF DOSYASI SUNUCUDA BULUNAMADI" HATASI: Streamlit'in ücretsiz
+    bulut sunucusunda uygulamanın diski her yeniden başlatmada sıfırlanıyor.
+    Sınav kaydı kalıcı veritabanında durduğu için listede görünüyor ama
+    dosyası silinmiş oluyordu. Artık üç aşama var:
+      1. Dosya diskte duruyorsa doğrudan kullanılır.
+      2. Yoksa veritabanında saklanan kopyası diske geri yazılır.
+      3. O da yoksa ve kaynak adresi biliniyorsa (MEB arşivinden inen
+         kitapçıklar) dosya yeniden indirilir.
+    Döner: (yol, mesaj). Yol None ise mesaj sebebi anlatır."""
+    yol = exam.get("pdf_path") or ""
+    if yol and os.path.exists(yol) and os.path.getsize(yol) > 0:
+        return yol, None
+
+    hedef = yol if yol else os.path.join(PDF_DIR, f"exam_{exam['id']}.pdf")
+    os.makedirs(os.path.dirname(hedef) or PDF_DIR, exist_ok=True)
+
+    # 2) Veritabanındaki kopya
+    try:
+        ad, veri = db.pdf_getir(exam["id"])
+    except Exception:
+        ad, veri = None, None
+    if veri:
+        try:
+            with open(hedef, "wb") as f:
+                f.write(veri)
+            return hedef, None
+        except Exception as e:
+            return None, f"Kayıtlı kopya diske yazılamadı: {e}"
+
+    # 3) Kaynak adresinden yeniden indirme
+    kaynak = exam.get("source_url")
+    if kaynak:
+        try:
+            ok, mesaj = bot.fetch_from_url(kaynak, hedef)
+        except Exception as e:
+            ok, mesaj = False, str(e)
+        if ok and os.path.exists(hedef) and os.path.getsize(hedef) > 0:
+            return hedef, None
+        return None, f"Kitapçık kaynağından indirilemedi: {mesaj}"
+    return None, "yok"
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _pdf_yolu_onbellekli(exam_id, pdf_path, source_url):
+    """Aynı deneme için geri yükleme işini oturumda bir kez yapar."""
+    return _pdf_yolunu_hazirla(
+        {"id": exam_id, "pdf_path": pdf_path, "source_url": source_url}
+    )
+
+
 @_fragman
 def _pdf_bolumu(pdf_path, baslik, height=780):
     """Kitapcik gosterimi -- kendi basina yenilenen bagimsiz bir parca.
@@ -786,7 +940,7 @@ def _optik_form(exam_id, attempt_no, student_name, aktif_yapi, aktif_anahtar, ik
             m["count"] for b in aktif_yapi.values() for m in b.values()
         )
         st.info(
-            f"🎯 **İkinci şans turu** — sadece daha önce yanlış yaptığın veya boş "
+            f"🎯 **Yanlışları Düzeltme Turu** — sadece daha önce yanlış yaptığın veya boş "
             f"bıraktığın **{_ikinci_n} soru** soruluyor. Soru numaraları "
             f"kitapçıktakiyle aynı."
         )
@@ -925,6 +1079,7 @@ def _optik_form(exam_id, attempt_no, student_name, aktif_yapi, aktif_anahtar, ik
         db.clear_progress(exam_id, student_name, attempt_no)
         st.session_state.pop(buf_key, None)
         st.success("Sınav tamamlandı! Sonuçlarınız kaydedildi.")
+        st.session_state["_sinav_balon"] = True
         st.rerun()
 
 
@@ -1642,7 +1797,7 @@ if aktif_bolum == SEK_SINAV:
                 if _kayit is None:
                     _etiket[_no] = f"{_i + 1}. tur (devam ediyor)"
                 elif _kayit.get("mode") == "yanlis":
-                    _etiket[_no] = f"{_i + 1}. tur · 🎯 ikinci şans · net {_kayit['total_net']}"
+                    _etiket[_no] = f"{_i + 1}. tur · 🎯 düzeltme turu · net {_kayit['total_net']}"
                 else:
                     _etiket[_no] = f"{_i + 1}. tur · 📝 tam sınav · net {_kayit['total_net']}"
             _yeni_tur = st.selectbox(
@@ -1689,13 +1844,33 @@ if aktif_bolum == SEK_SINAV:
             col_pdf, col_form = st.columns([6, 4])
 
         with col_pdf:
-            _pdf_bolumu(exam["pdf_path"], exam["title"])
+            _pdf_yolu, _pdf_hata = _pdf_yolu_onbellekli(
+                exam["id"], exam.get("pdf_path"), exam.get("source_url")
+            )
+            if _pdf_yolu:
+                _pdf_bolumu(_pdf_yolu, exam["title"])
+            else:
+                st.subheader(exam["title"])
+                st.error(
+                    "📄 **Bu denemenin kitapçığı sunucuda bulunamadı.**\n\n"
+                    "Sebebi: Streamlit'in ücretsiz sunucusu, uygulama her "
+                    "güncellendiğinde diski sıfırlıyor. Bu deneme, PDF'i "
+                    "veritabanına kaydedilmeden önce eklenmiş.\n\n"
+                    "**Çözüm:** Yönetici olarak **Admin Paneli → Kayıtlı Denemeler** "
+                    "bölümüne girip bu denemeyi silin, sonra yeniden ekleyin. "
+                    "Yeni eklenen denemelerin PDF'i artık veritabanında da "
+                    "saklanıyor, bir daha kaybolmayacak."
+                    + ("" if _pdf_hata in (None, "yok") else f"\n\n_Ayrıntı: {_pdf_hata}_")
+                )
 
         with col_form:
             if existing_result:
+                # Sınav yeni bitirildiyse kutlama: ekrana uçan balonlar.
+                if st.session_state.pop("_sinav_balon", False):
+                    st.balloons()
                 # ---- Bu deneme numarası için sınav zaten bitirilmiş: sonucu göster ----
                 if existing_result.get("mode") == "yanlis":
-                    st.success("🎯 **İkinci şans** turunu tamamladınız. Sonuçlarınız:")
+                    st.success("🎯 **Yanlışları Düzeltme Turu**'nu tamamladınız. Sonuçlarınız:")
                 else:
                     st.success("✅ Bu denemeyi zaten çözdünüz. Sonuçlarınız:")
                 st.caption(f"🗓️ Çözüm tarihi: **{_tarih_bicimle(existing_result.get('created_at'))}**")
@@ -1738,13 +1913,17 @@ if aktif_bolum == SEK_SINAV:
                 _yanlis_adet = sum(len(v) for d in _yanlislar.values() for v in d.values())
 
                 if _yanlis_adet and student_name:
-                    st.markdown(f"**🎯 İkinci şans:** {_yanlis_adet} soruyu yanlış yaptın veya boş bıraktın.")
+                    st.markdown(
+                        f"**🎯 Yanlışları Düzeltme Turu:** Bu testte **{_yanlis_adet} soruyu** "
+                        f"yanlış yaptın veya boş bıraktın."
+                    )
                     st.caption(
-                        "Bu düğme sadece o soruları yeniden sorar; doğru yaptıkların "
-                        "tekrar karşına çıkmaz. Önceki sonucun silinmez, ayrıca saklanır."
+                        "Aşağıdaki düğme sadece o soruları yeniden sorar; doğru yaptıkların "
+                        "tekrar karşına çıkmaz. Önceki sonucun silinmez, ayrıca saklanır ve "
+                        "raporda ikisi karşılaştırılır."
                     )
                     if st.button(
-                        f"🎯 Sadece Yanlışlarımı Çöz ({_yanlis_adet} soru)",
+                        f"🎯 Yanlışlarımı Düzelt ({_yanlis_adet} soru)",
                         key=f"wrongretry_{selected_exam_id}_{attempt_no}",
                         use_container_width=True,
                         type="primary",
@@ -1757,9 +1936,9 @@ if aktif_bolum == SEK_SINAV:
                         st.session_state.attempt[selected_exam_id] = _yeni
                         st.rerun()
                 elif _yanlis_adet and not student_name:
-                    st.info("İkinci şans için giriş yapmanız gerekiyor.")
+                    st.info("Yanlışları düzeltme turu için giriş yapmanız gerekiyor.")
                 elif _detay:
-                    st.success("🎉 Bu denemede hiç yanlışın yok, ikinci şansa gerek kalmadı!")
+                    st.success("🎉 Bu denemede hiç yanlışın yok, düzeltme turuna gerek kalmadı!")
 
                 if st.button(
                     "🔄 Yeniden Çöz (sınavın tamamını baştan)",
@@ -1830,7 +2009,7 @@ if aktif_bolum == SEK_RAPOR:
             _secilenler = []
             with _kutu("lgs_kompakt", height=430, border=True):
                 for _r in results:
-                    _tur = "🎯 İkinci şans" if _r.get("mode") == "yanlis" else "📝 Tam sınav"
+                    _tur = "🎯 Düzeltme turu" if _r.get("mode") == "yanlis" else "📝 Tam sınav"
                     _c0, _c1, _c2, _c3 = st.columns([0.7, 5, 1.5, 2.4])
                     if _c0.checkbox(
                         "seç", key=f"_secr_{_r['id']}", label_visibility="collapsed",
@@ -1946,6 +2125,10 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                 _flashes = [_flashes]
             for _kind, _text in _flashes:
                 (st.success if _kind == "success" else st.error)(_text)
+        # Uzun süren işlemler (kitap tarama, indirme, PIN kaydetme) bittiğinde
+        # ekrana uçan balonlar: "işlem gerçekten bitti" hissi veriyor.
+        if st.session_state.pop("_pin_balon", False) or st.session_state.pop("_islem_balon", False):
+            st.balloons()
 
         admin_section = st.radio(
             "İşlem seçin",
@@ -1958,6 +2141,7 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                 "URL'den PDF İndir",
                 "Google Drive'dan İçe Aktar",
                 "Kayıtlı Denemeler",
+                "🩹 Eksik Kitapçıkları Onar",
                 "Öğrenci Hesapları (Ekle/Sil/Şifre)",
                 "Öğrenci Raporları",
                 "Hesap Ayarları",
@@ -1969,13 +2153,39 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
         # ---------------- Soru bankasını test test ayır ----------------
         if admin_section == "📚 Soru Bankasını Test Test Ayır":
             st.markdown(
-                "Çok dersli bir **soru bankası PDF'i** yükleyin. Sistem kitabı tarayıp "
-                "içindeki her testi (**Türkçe - Sözcükte Anlam Test 3** gibi) ayrı ayrı bulur "
-                "ve kitabın sonundaki cevap anahtarıyla eşleştirir. Böylece çocuğunuz 50 soruluk "
-                "koca bir deneme yerine, **6-8 soruluk kısa konu testleri** çözebilir."
+                "Bir **soru bankası** ya da **çalışma kitabı** PDF'i yükleyin. Sistem kitabın "
+                "biçimini kendi anlar ve içindeki testleri tek tek bulup kitabın sonundaki "
+                "cevap anahtarıyla eşleştirir:\n\n"
+                "- **Konu testli soru bankaları** (sayfa üstünde *TEST 3* yazan kitaplar) → "
+                "her test ayrı bir deneme olur.\n"
+                "- **MEB LGS Çalışma Kitapları** ve benzeri **ünite/tema** düzenli kitaplar → "
+                "her ünite ayrı bir deneme olur. Kitabın sonundaki **geçmiş yıl merkezî sınav "
+                "soruları bölümü ALINMAZ** (onlar zaten *Otomatik İndirme* bölümünden ekleniyor)."
             )
-            qb_file = st.file_uploader("Soru bankası PDF'i", type=["pdf"], key="qb_pdf")
+            qb_file = st.file_uploader("Soru bankası / çalışma kitabı PDF'i", type=["pdf"], key="qb_pdf")
             qb_path_state = "_qb_path"
+
+            _parca_secenek = {
+                "Ünitenin tamamı tek test olsun": 0,
+                "En fazla 40 soruluk parçalara böl": 40,
+                "En fazla 25 soruluk parçalara böl": 25,
+                "En fazla 15 soruluk parçalara böl": 15,
+            }
+            _parca_ad = st.selectbox(
+                "Ünite/tema düzenli kitaplarda testleri nasıl bölelim?",
+                list(_parca_secenek.keys()),
+                index=2,
+                key="qb_parca",
+                help=(
+                    "MEB çalışma kitaplarında bir ünitede 150 soru olabiliyor; tek oturumda "
+                    "çözmek zor. Bölerseniz her parça ayrı bir test olarak eklenir, soru "
+                    "numaraları kitaptakiyle aynı kalır."
+                ),
+            )
+            st.caption(
+                "Bu ayar sadece **ünite/tema** düzenli kitapları etkiler; konu testli soru "
+                "bankalarında testler zaten kısa olduğu için bölünmez."
+            )
 
             if qb_file is not None and st.button("📖 Kitabı Tara", type="primary"):
                 _qb_path = os.path.join(PRIVATE_DIR, "_soru_bankasi.pdf")
@@ -1983,7 +2193,9 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     f.write(qb_file.getbuffer())
                 with st.spinner("Kitap taranıyor, testler ve cevap anahtarı bulunuyor..."):
                     try:
-                        _testler, _anahtar, _uyarilar = soru_bankasi.testleri_bul(_qb_path)
+                        _testler, _anahtar, _uyarilar = soru_bankasi.testleri_bul(
+                            _qb_path, parca_soru=_parca_secenek[_parca_ad]
+                        )
                     except Exception as e:
                         _testler, _anahtar, _uyarilar = [], {}, [f"Kitap okunamadı: {e}"]
                 st.session_state[qb_path_state] = _qb_path
@@ -1998,7 +2210,12 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     f"Kitapta **{len(_testler)} test** bulundu; bunlardan "
                     f"**{len(_eklenebilir)} tanesi** eklenebilir durumda."
                 )
-                _kirpik = [t for t in _eklenebilir if (t.get("numaralar") or [1])[0] != 1]
+                # Ünite kitaplarında parçalar zaten ortadan başlar (2. parça
+                # 26. sorudan); bu normaldir, "tanıtım sürümü" uyarısı çıkmasın.
+                _kirpik = [
+                    t for t in _eklenebilir
+                    if t.get("tur") != "unite" and (t.get("numaralar") or [1])[0] != 1
+                ]
                 if _kirpik:
                     st.info(
                         f"ℹ️ Bu PDF bir **tanıtım/örnek sürüm** gibi görünüyor: {len(_kirpik)} testin "
@@ -2021,6 +2238,13 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     _d["bulunan"] += 1
                     if _t.get("cevaplar") and _t.get("numaralar"):
                         _d["eklenebilir"] += 1
+                _unite_kitabi = any(t.get("tur") == "unite" for t in _testler)
+                if _unite_kitabi:
+                    st.info(
+                        "📗 Bu bir **ünite/tema düzenli çalışma kitabı**. Aşağıdaki listede "
+                        "her satır bir ünitedir. Kitabın sonundaki **geçmiş yıl merkezî sınav "
+                        "soruları alınmadı** — siz sadece ünite sorularını istemiştiniz."
+                    )
                 st.markdown("##### 📊 Ders ders durum")
                 _tablo(pd.DataFrame([
                     {
@@ -2038,13 +2262,27 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     }
                     for _d, _v in sorted(_ozet.items())
                 ]))
-                st.caption(
+                if _unite_kitabi and _eklenebilir:
+                    _tablo(pd.DataFrame([
+                        {
+                            "Ders": t["ders"],
+                            "Ünite / Test": t["konu"],
+                            "Soru": len(t.get("numaralar") or []),
+                            "Sayfa": len(t.get("sayfalar") or []),
+                            "Kitapta sayfa": (
+                                f"{t['sayfalar'][0]}-{t['sayfalar'][-1]}" if t.get("sayfalar") else "—"
+                            ),
+                        }
+                        for t in _eklenebilir
+                    ]))
+                if len(_eklenebilir) < len(_testler):
+                  st.caption(
                     "**Eklenemeyenler neden eklenemiyor?** Bir testi puanlayabilmek için cevap "
                     "anahtarı şart. Bu PDF'in sonundaki cevap anahtarı bölümü eksik: bazı derslerin "
                     "anahtarı hiç yok, bazılarında birkaç test atlanmış. Anahtarı olmayan testi "
                     "eklemek, çocuğun çözüp sonuç alamaması demek olurdu; o yüzden sistem onları "
                     "atlıyor. Kitabın **tam sürümünü** bulursanız aynı işlem hepsini ekler."
-                )
+                  )
                 for _u in st.session_state.get("_qb_uyarilar", []):
                     st.warning(_u)
                 if not _eklenebilir:
@@ -2054,13 +2292,24 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     _secili_ders = st.selectbox("Ders", _dersler, key="qb_ders")
                     _bu_ders = [t for t in _eklenebilir if t["ders"] == _secili_ders]
 
+                    def _qb_basligi(t):
+                        """Denemenin adı. Ünite kitaplarında 'Test 3' demek
+                        anlamsız olurdu; ünite adı zaten 'konu' alanında."""
+                        if t.get("tur") == "unite":
+                            return f"{t['ders']} · {t['konu']}"
+                        return f"{t['ders']} · Test {t['test_no']} · {t['konu']}"
+
                     def _qb_etiket(t):
                         _nums = t.get("numaralar") or []
                         if _nums and _nums[0] != 1:
-                            _ek = f"{len(_nums)} soru: kitapta {_nums[0]}-{_nums[-1]}"
+                            _ek = f"{len(_nums)} soru · kitapta {_nums[0]}-{_nums[-1]}"
                         else:
                             _ek = f"{len(_nums)} soru"
-                        return f"Test {t['test_no']} · {t['konu']} ({_ek})"
+                        _sy = t.get("sayfalar") or []
+                        if _sy:
+                            _ek += f" · {len(_sy)} sayfa"
+                        _ad = t["konu"] if t.get("tur") == "unite" else f"Test {t['test_no']} · {t['konu']}"
+                        return f"{_ad} ({_ek})"
 
                     _secilenler = st.multiselect(
                         "Eklenecek testler",
@@ -2069,32 +2318,44 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         format_func=_qb_etiket,
                         key="qb_secim",
                     )
+                    _unite_mi = any(t.get("tur") == "unite" for t in _bu_ders)
+                    _varsayilan_kat = (
+                        f"Ünite Testleri - {_secili_ders}" if _unite_mi
+                        else f"Soru Bankası - {_secili_ders}"
+                    )
+                    _kategori_adi = st.text_input(
+                        "Hangi bölüme eklensin?", value=_varsayilan_kat, key="qb_kategori",
+                        help="Öğrenci 'Sınav Çöz' ekranında bu adı görecek.",
+                    )
                     st.caption(
-                        f"{len(_secilenler)} test seçili. Her test ayrı bir deneme olarak "
-                        f"**Soru Bankası - {_secili_ders}** kategorisine eklenir."
+                        f"{len(_secilenler)} test seçili. Her biri ayrı bir deneme olarak "
+                        f"**{_kategori_adi or _varsayilan_kat}** bölümüne eklenir."
                     )
                     if st.button("✅ Seçilen Testleri Ekle", type="primary", disabled=not _secilenler):
-                        _kategori = f"Soru Bankası - {_secili_ders}"
+                        _kategori = (_kategori_adi or _varsayilan_kat).strip()
                         db.add_category(_kategori)
                         _kaynak = st.session_state.get(qb_path_state)
                         _flash, _eklendi, _atlandi = [], 0, 0
                         _bar = st.progress(0.0, text="Testler ekleniyor...")
                         for _n, _t in enumerate(_secilenler, start=1):
-                            _baslik = f"{_secili_ders} · Test {_t['test_no']} · {_t['konu']}"
+                            _baslik = _qb_basligi(_t)
                             if db.exam_exists(_baslik, _kategori):
                                 _atlandi += 1
                                 _bar.progress(_n / len(_secilenler), text=f"{_n}/{len(_secilenler)}")
                                 continue
                             _hedef = os.path.join(
                                 PDF_DIR,
-                                f"sb_{slugify(_secili_ders)}_{_t['test_no']}_{slugify(_t['konu'])}.pdf",
+                                f"sb_{slugify(_secili_ders)}_{_t['test_no']}_{slugify(_t['konu'])[:40]}.pdf",
                             )
                             try:
                                 # Sayfada GERÇEKTEN basılı olan soru numaraları
                                 # (kitabın ilk sayfası yoksa test 4. sorudan
                                 # başlayabilir) -- optik form bunlarla birebir
                                 # aynı numaraları gösterecek.
-                                _numaralar = soru_bankasi.gorunen_sorular(
+                                # Ünite düzenli kitaplarda numaralar zaten
+                                # tarama sırasında sayfa sayfa okundu; klasik
+                                # soru bankalarında ise burada bulunuyor.
+                                _numaralar = _t.get("numaralar") or soru_bankasi.gorunen_sorular(
                                     _kaynak, _t["sayfalar"], list(_t["cevaplar"].keys())
                                 )
                                 if not _numaralar:
@@ -2124,11 +2385,13 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                                 # katmanlı biçimde olmalı: bölüm -> ders -> liste.
                                 # (Tek katmanlı verildiğinde puanlama sessizce
                                 # 0 net üretiyordu -- testte yakalandı.)
-                                db.add_exam(
+                                _yeni_id, _uyari = _deneme_ekle(
                                     _baslik, _kategori, _hedef, _yapi,
                                     {"Genel": {_secili_ders: _sirali}},
                                     source="soru-bankasi",
                                 )
+                                if _uyari:
+                                    _flash.append(("error", _uyari))
                                 _eklendi += 1
                             except Exception as e:
                                 _flash.append(("error", f"❌ {_baslik}: {e}"))
@@ -2138,6 +2401,8 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                             f"✅ {_eklendi} test eklendi"
                             + (f", {_atlandi} test zaten vardı (atlandı)." if _atlandi else "."),
                         ))
+                        if _eklendi:
+                            st.session_state["_islem_balon"] = True
                         st.session_state["_admin_flash"] = _flash
                         st.rerun()
 
@@ -2205,7 +2470,7 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                                 )
                                 with st.spinner("PDF hazırlanıyor ve küçültülüyor, bu birkaç saniye sürebilir..."):
                                     parsing.merge_full([sozel_pdf, sayisal_pdf], orig_path)
-                                db.add_exam(
+                                _eid, _uy = _deneme_ekle(
                                     exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE, manual_key,
                                     source="manuel-elle-cevap", pdf_path_original=orig_path,
                                 )
@@ -2224,7 +2489,7 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                             )
                             parsing.merge_full([sozel_pdf, sayisal_pdf], orig_path)
                         final_key = {"Sözel": sozel_key, "Sayısal": sayisal_key}
-                        db.add_exam(
+                        _eid, _uy = _deneme_ekle(
                             exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE, final_key,
                             source="otomatik-ayrıştırma", pdf_path_original=orig_path,
                         )
@@ -2318,7 +2583,8 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                             parsing.merge_full([uploaded], orig_path)
                     else:
                         safe_path = ""  # PDF yok, sadece cevap anahtarı / metin bazlı çalışılabilir
-                    db.add_exam(title, gcat, safe_path, structure, final_key, source="manuel", pdf_path_original=orig_path)
+                    _eid, _uy = _deneme_ekle(title, gcat, safe_path, structure, final_key,
+                                             source="manuel", pdf_path_original=orig_path)
                     note = _compression_note(safe_path) if safe_path else ""
                     st.session_state["_admin_flash"] = ("success", f"'{title}' {gcat} kategorisine eklendi." + note)
                     st.rerun()
@@ -2445,12 +2711,14 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         parsing.crop_and_merge([(_ham, _kidx)], _guvenli)
                         _orij = os.path.join(PRIVATE_DIR, f"iokbs_{_y}_{_s}_orijinal.pdf")
                         parsing.merge_full([_ham], _orij)
-                        db.add_exam(
+                        _eid, _uy = _deneme_ekle(
                             _baslik, _kategori, _guvenli,
                             build_generic_structure(_yapi_satir),
                             {"Genel": _key}, source="otomatik-iokbs",
                             pdf_path_original=_orij,
                         )
+                        if _uy:
+                            _bl_flash.append(("error", _uy))
                         _ekl += 1
                         _bl_flash.append(("success", f"✅ {_baslik}: eklendi." + _compression_note(_guvenli)))
                     _bar.empty()
@@ -2459,6 +2727,8 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         f"Bitti: **{_ekl} kitapçık eklendi**"
                         + (f", {_atl} tanesi zaten vardı." if _atl else "."),
                     ))
+                    if _ekl:
+                        st.session_state["_islem_balon"] = True
                     st.session_state["_admin_flash"] = _bl_flash
                     st.rerun()
 
@@ -2545,11 +2815,13 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     orig_path = os.path.join(PRIVATE_DIR, f"{yil}_LGS_orijinal.pdf")
                     parsing.merge_full([res["Sözel"], res["Sayısal"]], orig_path)
                     _ilerleme.progress(_yi / len(years), text=f"{yil}: eklendi ({_yi}/{len(years)})")
-                    db.add_exam(
+                    _eid, _uy = _deneme_ekle(
                         exam_title, LGS_CATEGORY, safe_path, LGS_STRUCTURE,
                         {"Sözel": sozel_key, "Sayısal": sayisal_key}, source="otomatik-eba",
                         pdf_path_original=orig_path,
                     )
+                    if _uy:
+                        _eba_flashes.append(("error", _uy))
                     _eba_flashes.append(("success", f"✅ {yil}: eklendi." + _compression_note(safe_path)))
                 # İlerleme çubuğunu ve durum alanını temizle, sonuçları
                 # yeniden çizilen sayfada tek seferde göster.
@@ -2599,6 +2871,115 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         st.success(f"İndirildi: {f['name']} — 'Diğer Kategori Ekle' bölümünden işleyebilirsiniz.")
 
         # ---------------- Kayıtlı denemeler ----------------
+        elif admin_section == "🩹 Eksik Kitapçıkları Onar":
+            st.markdown("#### 🩹 Kitapçığı kaybolan denemeler")
+            st.markdown(
+                "**Sorun neydi?** Streamlit'in ücretsiz bulut sunucusu, uygulama her "
+                "güncellendiğinde diski **sıfırlıyor**. Sınav kayıtları kalıcı "
+                "veritabanında (Supabase) durduğu için listede görünmeye devam ediyor, "
+                "ama **kitapçık dosyaları siliniyordu** — bu yüzden denemeyi açınca "
+                "*\"PDF dosyası sunucuda bulunamadı\"* yazıyordu.\n\n"
+                "**Artık kalıcı:** Bu güncellemeden sonra eklenen her denemenin "
+                "kitapçığı veritabanına da yazılıyor. Aşağıdaki liste, ESKİ eklenmiş "
+                "ve dosyası kaybolmuş denemeleri gösterir."
+            )
+            _tum = db.get_exams()
+            try:
+                _saklanan = db.pdf_saklananlar()
+            except Exception:
+                _saklanan = {}
+            _bozuk, _saglam = [], 0
+            for _e in _tum:
+                _y = _e.get("pdf_path") or ""
+                _diskte = bool(_y) and os.path.exists(_y) and os.path.getsize(_y) > 0
+                if _diskte or _e["id"] in _saklanan or _e.get("source_url"):
+                    _saglam += 1
+                else:
+                    _bozuk.append(_e)
+
+            _m1, _m2, _m3 = st.columns(3)
+            _m1.metric("📚 Toplam deneme", len(_tum))
+            _m2.metric("✅ Açılabilir", _saglam)
+            _m3.metric("❌ Kitapçığı yok", len(_bozuk))
+            if _saklanan:
+                st.caption(
+                    f"💾 Veritabanında saklanan kitapçık: **{len(_saklanan)} adet**, "
+                    f"toplam **{sum(_saklanan.values()) / 1e6:.1f} MB**."
+                )
+
+            # Diskte duran ama veritabanına kaydedilmemiş olanları tamamla
+            _yedeksiz = [
+                _e for _e in _tum
+                if _e["id"] not in _saklanan
+                and (_e.get("pdf_path") or "")
+                and os.path.exists(_e["pdf_path"]) and os.path.getsize(_e["pdf_path"]) > 0
+            ]
+            if _yedeksiz:
+                st.info(
+                    f"📥 **{len(_yedeksiz)} denemenin** kitapçığı şu an diskte duruyor ama "
+                    f"kalıcı kopyası yok. Aşağıdaki düğme hepsini veritabanına yazar; "
+                    f"böylece sunucu yeniden başladığında da açılabilirler."
+                )
+                if st.button(f"💾 {len(_yedeksiz)} kitapçığı kalıcı olarak sakla",
+                             type="primary", key="_yedekle_btn"):
+                    _bar = st.progress(0.0, text="Başlıyor...")
+                    _ok_say, _hata = 0, []
+                    for _i, _e in enumerate(_yedeksiz, start=1):
+                        _bar.progress(_i / len(_yedeksiz), text=f"{_e['title']} ({_i}/{len(_yedeksiz)})")
+                        try:
+                            if os.path.getsize(_e["pdf_path"]) > db.PDF_SAKLAMA_SINIRI:
+                                parsing.gorsel_kucult(_e["pdf_path"], sinir=db.PDF_SAKLAMA_SINIRI)
+                            with open(_e["pdf_path"], "rb") as _fh:
+                                _ok, _msj = db.pdf_kaydet(
+                                    _e["id"], os.path.basename(_e["pdf_path"]), _fh.read())
+                            if _ok:
+                                _ok_say += 1
+                            else:
+                                _hata.append(f"{_e['title']}: {_msj}")
+                        except Exception as _ex:
+                            _hata.append(f"{_e['title']}: {_ex}")
+                    _bar.empty()
+                    _mesajlar = [("success", f"✅ {_ok_say} kitapçık kalıcı olarak saklandı.")]
+                    _mesajlar += [("error", f"⚠️ {h}") for h in _hata[:10]]
+                    st.session_state["_admin_flash"] = _mesajlar
+                    st.session_state["_islem_balon"] = bool(_ok_say)
+                    st.rerun()
+
+            if not _bozuk:
+                st.success("🎉 Kitapçığı kayıp deneme yok; hepsi açılabilir durumda.")
+            else:
+                st.warning(
+                    f"Aşağıdaki **{len(_bozuk)} denemenin** kitapçığı hem diskte hem "
+                    f"veritabanında yok; bunlar açılamaz. Yapılacak tek şey: **silip "
+                    f"yeniden eklemek.** (Geçmiş yıl LGS ve bursluluk kitapçıkları "
+                    f"'Otomatik İndirme' bölümünden tek tuşla geri gelir.)"
+                )
+                _tablo(pd.DataFrame([
+                    {"Deneme": _e["title"], "Bölüm": _e["category"],
+                     "Eklenme": _tarih_bicimle(_e.get("created_at")),
+                     "Kaynak": _e.get("source") or "—"}
+                    for _e in _bozuk
+                ]))
+                st.caption(
+                    "Silmek sadece kitapçığı ve sınav kaydını siler; **öğrenci hesapları "
+                    "ve geçmiş sonuçlar** ayrı tabloda durur. Ancak silinen sınavın eski "
+                    "sonuçları da listeden kalkar."
+                )
+                _onay = st.checkbox(
+                    f"Evet, kitapçığı kayıp {len(_bozuk)} denemeyi silmek istiyorum",
+                    key="_bozuk_onay",
+                )
+                if st.button("🗑️ Kayıp denemeleri sil", disabled=not _onay, key="_bozuk_sil"):
+                    for _e in _bozuk:
+                        db.delete_exam(_e["id"])
+                    st.session_state["_admin_flash"] = (
+                        "success",
+                        f"🗑️ {len(_bozuk)} kayıp deneme silindi. Şimdi 'Otomatik İndirme' "
+                        f"veya 'Soru Bankasını Test Test Ayır' bölümünden yeniden ekleyin — "
+                        f"bu kez kitapçıkları kalıcı olarak saklanacak.",
+                    )
+                    st.rerun()
+
         elif admin_section == "Kayıtlı Denemeler":
             # Bölüm bölüm ve test numarasına göre sıralı (1, 2, 3 ... 10, 11).
             all_exams = sorted(
@@ -2794,11 +3175,22 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                 "sorulmaz. **Boş bırakırsanız PIN sorulmaz**, döküm herkese açık olur."
             )
             _mevcut_pin = db.get_setting("rapor_pin", "") or ""
-            st.text_input(
-                "Şu anki PIN",
-                value=("(belirlenmemiş)" if not _mevcut_pin else "•" * len(_mevcut_pin)),
-                disabled=True, key="pin_mevcut_gosterim",
-            )
+            # ÖNEMLİ - KULLANICI GERİ BİLDİRİMİ ("PIN girdim ama kaydedilip
+            # kaydedilmediğini anlamadım"): Durum artık büyük ve net yazıyor,
+            # ayrıca PIN'in kaç haneli olduğu ve ne zaman kaydedildiği görünüyor.
+            if _mevcut_pin:
+                st.success(
+                    f"🔒 **PIN kodu ŞU AN AKTİF.** {len(_mevcut_pin)} haneli bir kod "
+                    f"kayıtlı (güvenlik için kodun kendisi gösterilmez). Öğrenci "
+                    f"**Gelişim Raporum → 🔍 Sınav Detayı** derken bu kod sorulacak.",
+                    icon="✅",
+                )
+            else:
+                st.warning(
+                    "🔓 **PIN kodu YOK.** Şu an soru soru döküm (doğru cevaplar dâhil) "
+                    "PIN sorulmadan açılıyor. Kod koymak için aşağıya yazıp "
+                    "**PIN'i Kaydet**'e basın."
+                )
             _yeni_pin = st.text_input(
                 "Yeni PIN kodu", type="password", key="pin_yeni",
                 help="Sadece rakam kullanmanız önerilir (ör. 4-6 haneli).",
@@ -2810,11 +3202,25 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     st.error("PIN en az 4 karakter olmalı.")
                 else:
                     db.set_setting("rapor_pin", _t)
-                    st.session_state["_admin_flash"] = (
-                        "success",
-                        "✅ Rapor PIN kodu güncellendi." if _t
-                        else "✅ PIN kaldırıldı; döküm artık PIN sorulmadan açılacak.",
-                    )
+                    # Kaydın gerçekten oluştuğunu veritabanından OKUYARAK doğrula
+                    _kontrol = db.get_setting("rapor_pin", "") or ""
+                    if _t and _kontrol == _t:
+                        st.session_state["_admin_flash"] = (
+                            "success",
+                            f"✅ **PIN kodu kaydedildi ve doğrulandı** ({len(_t)} haneli). "
+                            f"Bundan sonra 'Sınav Detayı' bu kodla açılacak. "
+                            f"Kodu unutmayın — burada bir daha gösterilmez.",
+                        )
+                        st.session_state["_pin_balon"] = True
+                    elif not _t:
+                        st.session_state["_admin_flash"] = (
+                            "success", "✅ PIN kaldırıldı; döküm artık PIN sorulmadan açılacak.")
+                    else:
+                        st.session_state["_admin_flash"] = (
+                            "error",
+                            "❌ PIN kaydedilemedi (veritabanına yazıldıktan sonra geri "
+                            "okunamadı). Lütfen tekrar deneyin.",
+                        )
                     st.rerun()
             if _pc2.button("PIN'i Kaldır", key="pin_kaldir"):
                 db.set_setting("rapor_pin", "")

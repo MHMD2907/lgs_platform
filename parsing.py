@@ -269,3 +269,48 @@ def pdf_page_count(file_obj_or_path):
     if hasattr(file_obj_or_path, "seek"):
         file_obj_or_path.seek(0)
     return len(PdfReader(file_obj_or_path).pages)
+
+
+def gorsel_kucult(yol, dpi=110, kalite=58, sinir=None):
+    """Bir PDF'i, her sayfasini RESME cevirerek kucultur.
+
+    NEDEN GEREKLI: Denemelerin PDF'i artik veritabaninda da saklaniyor
+    (Streamlit bulut sunucusu diski her yeniden baslatmada sildigi icin).
+    Veritabaninda saklanabilecek boyut sinirli oldugundan, cok buyuk
+    dosyalari once kucultuyoruz. Uygulama PDF'i zaten SAYFA SAYFA RESIM
+    olarak gosterdigi icin gorsel kalite farki ekranda fark edilmez.
+
+    Olculdu: 20 sayfalik bir bolum 4,7 MB -> 1,8 MB.
+
+    sinir verilirse (bayt), dosya zaten kucukse hic dokunulmaz.
+    Basarisiz olursa dosya oldugu gibi kalir (hic hata firlatmaz)."""
+    try:
+        if not yol or not os.path.exists(yol):
+            return False
+        if sinir and os.path.getsize(yol) <= sinir:
+            return False
+        import pypdfium2 as pdfium
+        from PIL import Image  # noqa: F401
+
+        doc = pdfium.PdfDocument(yol)
+        try:
+            sayfalar = []
+            for i in range(len(doc)):
+                sayfalar.append(doc[i].render(scale=dpi / 72).to_pil().convert("RGB"))
+        finally:
+            doc.close()
+        if not sayfalar:
+            return False
+        buf = io.BytesIO()
+        sayfalar[0].save(
+            buf, "PDF", save_all=True, append_images=sayfalar[1:],
+            resolution=dpi, quality=kalite,
+        )
+        veri = buf.getvalue()
+        if veri and len(veri) < os.path.getsize(yol):
+            with open(yol, "wb") as f:
+                f.write(veri)
+            return True
+    except Exception:
+        pass
+    return False

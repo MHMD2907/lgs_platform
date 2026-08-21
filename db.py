@@ -191,6 +191,8 @@ def _to_pg(sql):
                 sql, re.IGNORECASE):
         sql = re.sub(r"(ADD\s+COLUMN)\s+", r"\1 IF NOT EXISTS ", sql, count=1,
                      flags=re.IGNORECASE)
+    # PostgreSQL'de ikili (binary) veri sütununun adı BYTEA'dir.
+    sql = re.sub(r"\bBLOB\b", "BYTEA", sql)
     # PostgreSQL'de REAL/TEXT zaten var; PRAGMA yok sayılır.
     return sql
 
@@ -408,6 +410,28 @@ def init_db():
         c.execute("ALTER TABLE results ADD COLUMN mode TEXT DEFAULT 'tam'")
     except Exception:
         pass  # sütun zaten var (SQLite hata verir, PostgreSQL'de IF NOT EXISTS ile hiç oluşmaz)
+
+    # ÖNEMLİ - "PDF DOSYASI SUNUCUDA BULUNAMADI" HATASININ ÇÖZÜMÜ:
+    # Streamlit'in ücretsiz bulut sunucusunda uygulama klasörüne yazılan
+    # DOSYALAR her yeniden başlatmada/güncellemede silinir. Sınav kayıtları
+    # veritabanında (Supabase) durduğu için listede görünüyor, ama PDF'i
+    # diskten silindiği için açılamıyordu. Artık her denemenin PDF'i de
+    # veritabanında saklanıyor; dosya bulunamazsa buradan geri yazılıyor.
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS exam_files (
+            exam_id INTEGER PRIMARY KEY,
+            filename TEXT NOT NULL,
+            data BLOB NOT NULL,
+            boyut INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )"""
+    )
+    # Otomatik indirilen kitapçıklarda dosyayı veritabanında saklamak yerine
+    # kaynak adresi saklamak yeterli: dosya kaybolursa yeniden indirilir.
+    try:
+        c.execute("ALTER TABLE exams ADD COLUMN source_url TEXT")
+    except Exception:
+        pass  # sütun zaten var
 
     # Uygulama ayarlari (ornegin rapor PIN kodu) icin basit anahtar-deger tablosu
     c.execute(
@@ -725,13 +749,14 @@ def add_category(name):
 # ---------- exams ----------
 
 @_yazma
-def add_exam(title, category, pdf_path, structure, answer_key, source="manuel", pdf_path_original=None):
+def add_exam(title, category, pdf_path, structure, answer_key, source="manuel",
+             pdf_path_original=None, source_url=None):
     conn = get_conn()
     c = conn.cursor()
     exam_id = _insert_id(
         c,
-        """INSERT INTO exams (title, category, source, pdf_path, structure, answer_key, created_at, pdf_path_original)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO exams (title, category, source, pdf_path, structure, answer_key, created_at, pdf_path_original, source_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             title,
             category,
@@ -741,6 +766,7 @@ def add_exam(title, category, pdf_path, structure, answer_key, source="manuel", 
             json.dumps(answer_key, ensure_ascii=False),
             datetime.now().isoformat(timespec="seconds"),
             pdf_path_original,
+            source_url,
         ),
     )
     conn.commit()
@@ -798,6 +824,10 @@ def delete_exam(exam_id):
         "SELECT pdf_path, pdf_path_original FROM exams WHERE id = ?", (exam_id,)
     ).fetchone()
     conn.execute("DELETE FROM exams WHERE id = ?", (exam_id,))
+    try:
+        conn.execute("DELETE FROM exam_files WHERE exam_id = ?", (exam_id,))
+    except Exception:
+        pass  # eski veritabanlarında bu tablo olmayabilir
     conn.commit()
     conn.close()
     if row:
@@ -1005,5 +1035,89 @@ def clear_results_for_exam(exam_id, student_name=None):
         )
     else:
         conn.execute("DELETE FROM results WHERE exam_id = ?", (exam_id,))
+    conn.commit()
+    conn.close()
+
+
+# =====================================================================
+#  DENEME PDF'LERİNİN KALICI SAKLANMASI
+# =====================================================================
+# ÖNEMLİ - "PDF DOSYASI SUNUCUDA BULUNAMADI" HATASI:
+# Streamlit'in ücretsiz bulut sunucusu, uygulamanın diskini her yeniden
+# başlatmada sıfırlar. Sınav KAYDI kalıcı veritabanında (Supabase) durduğu
+# için listede görünmeye devam ediyor, ama PDF DOSYASI silindiği için
+# açılmıyordu. Aşağıdaki fonksiyonlar PDF'i de veritabanında saklar;
+# dosya kaybolduğunda buradan geri yazılır.
+#
+# Otomatik indirilen MEB kitapçıkları için dosyayı saklamaya gerek yok:
+# onların kaynak adresi (source_url) saklanıyor, gerekince yeniden iniyor.
+
+PDF_SAKLAMA_SINIRI = 30 * 1024 * 1024  # 30 MB'tan büyük dosyalar saklanmaz
+
+
+@_yazma
+def pdf_kaydet(exam_id, filename, data):
+    """Bir denemenin PDF'ini veritabanına yazar (varsa üzerine)."""
+    if not data:
+        return False, "Dosya boş."
+    if len(data) > PDF_SAKLAMA_SINIRI:
+        return False, (
+            f"Dosya {len(data) / 1e6:.0f} MB; veritabanında saklamak için çok büyük "
+            f"(sınır {PDF_SAKLAMA_SINIRI / 1e6:.0f} MB)."
+        )
+    conn = get_conn()
+    conn.execute("DELETE FROM exam_files WHERE exam_id = ?", (exam_id,))
+    conn.execute(
+        """INSERT INTO exam_files (exam_id, filename, data, boyut, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (exam_id, filename, data, len(data), datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    conn.close()
+    return True, None
+
+
+def pdf_getir(exam_id):
+    """Denemenin PDF içeriğini veritabanından okur; yoksa None."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT filename, data FROM exam_files WHERE exam_id = ?", (exam_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None, None
+    ham = row["data"]
+    # PostgreSQL sürücüsü ikili veriyi 'memoryview' olarak döndürür.
+    if isinstance(ham, memoryview):
+        ham = bytes(ham)
+    elif isinstance(ham, str):
+        ham = ham.encode("latin-1", "ignore")
+    return row["filename"], ham
+
+
+@_onbellekli
+def pdf_saklananlar():
+    """Hangi denemelerin PDF'i veritabanında duruyor: {exam_id: boyut}"""
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT exam_id, boyut FROM exam_files").fetchall()
+    except Exception:
+        rows = []
+    conn.close()
+    return {r["exam_id"]: r["boyut"] for r in rows}
+
+
+@_yazma
+def pdf_sil(exam_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM exam_files WHERE exam_id = ?", (exam_id,))
+    conn.commit()
+    conn.close()
+
+
+@_yazma
+def exam_kaynak_adresi_yaz(exam_id, url):
+    conn = get_conn()
+    conn.execute("UPDATE exams SET source_url = ? WHERE id = ?", (url, exam_id))
     conn.commit()
     conn.close()

@@ -216,33 +216,91 @@ def scrape_bursluluk(page_url=BURSLULUK_SOURCE_PAGE, ayrinti=None):
             return u
         return dizin + "/" + u
 
-    # Yil basliklari ve baglantilari BELGE SIRASINDA birlikte tara
+    # =================================================================
+    #  BAĞLANTILARI BULMA
+    # =================================================================
+    # ÖNEMLİ - ÖNCEKİ SÜRÜMÜN HATASI (kullanıcı ekran görüntüsüyle gösterdi):
+    # Sayfada bağlantının YAZISI "Tıklayınız"; sınıf bilgisi ise bağlantıdan
+    # ÖNCEKİ metinde duruyor:
+    #
+    #     <p>2016 yılı bursluluk sınav kitapçıkları ve cevap anahtarı</p>
+    #     <p>5. Sınıf için <a href=".../09102041_ioksb5_2016.pdf">Tıklayınız</a></p>
+    #
+    # Eski kod sınıf bilgisini bağlantının YAZISINDA aradığı için hiçbir şey
+    # bulamıyor, "52 bağlantı gördüm ama hiçbiri 'X. Sınıf' kalıbına uymadı"
+    # diyordu. Artık üç yöntem birden kullanılıyor:
+    #   1. DOSYA ADI  -> ".../ioksb5_2016.pdf" hem sınıfı hem yılı söyler.
+    #      (MEB dosya adlarında "iokbs" ve "ioksb" yazımlarının ikisi de var.)
+    #   2. Bağlantıdan ÖNCE gelen en son "N. Sınıf" ifadesi.
+    #   3. Bağlantıdan ÖNCE gelen en son "20XX yılı" başlığı.
     desen = re.compile(
         r'(?P<link><a[^>]+href=["\'](?P<href>[^"\']+)["\'][^>]*>(?P<metin>.*?)</a>)'
-        r"|(?P<yil>20[0-9]{2})\s*y[ıi]l[ıi]",
+        r"|(?P<yil>20[0-9]{2})\s*y[ıiİI]l[ıiİI]"
+        r"|(?P<sinif>[5-9]|1[0-2])\s*\.?\s*[sS][ıiİI][nN][ıiİI][fF]",
         re.IGNORECASE | re.DOTALL,
     )
+    # Dosya adından sınıf + yıl: "09102041_ioksb5_2016.pdf"
+    dosya_deseni = re.compile(
+        r"(?:iokbs|ioksb|iobks|ikobs)[\s_\-]*([5-8])[\s_\-]*(20[0-9]{2})", re.IGNORECASE
+    )
+    dosya_deseni_ters = re.compile(
+        r"(20[0-9]{2})[\s_\-]*(?:iokbs|ioksb|iobks|ikobs)[\s_\-]*([5-8])", re.IGNORECASE
+    )
+
     bulunan = {}
     aktif_yil = None
+    aktif_sinif = None
+    link_sayisi = 0
+    pdf_sayisi = 0
     for m in desen.finditer(html):
         if m.group("yil"):
             aktif_yil = int(m.group("yil"))
+            aktif_sinif = None
             continue
-        if aktif_yil is None:
+        if m.group("sinif"):
+            aktif_sinif = int(m.group("sinif"))
             continue
-        metin = re.sub(r"<[^>]+>", " ", m.group("metin") or "")
-        metin = re.sub(r"\s+", " ", metin).strip()
-        sm = re.search(r"([5-9]|1[0-2])\s*\.?\s*s[ıi]n[ıi]f", _normalize(metin))
-        if not sm:
+        # --- bir bağlantı ---
+        link_sayisi += 1
+        href = m.group("href") or ""
+        tam = _tam_url(href)
+        if ".pdf" not in href.lower():
             continue
-        sinif = int(sm.group(1))
-        bulunan.setdefault((aktif_yil, sinif), _tam_url(m.group("href")))
-    if not bulunan:
-        _toplam_link = len(re.findall(r"<a[^>]+href=", html, re.IGNORECASE))
+        pdf_sayisi += 1
+        yil, sinif = aktif_yil, aktif_sinif
+        # 1) Dosya adı en güvenilir kaynak
+        dm = dosya_deseni.search(href) or dosya_deseni_ters.search(href)
+        if dm:
+            if dosya_deseni.search(href):
+                sinif, yil = int(dm.group(1)), int(dm.group(2))
+            else:
+                yil, sinif = int(dm.group(1)), int(dm.group(2))
+        else:
+            # 2) Bağlantının kendi yazısında sınıf geçiyorsa onu kullan
+            metin = re.sub(r"<[^>]+>", " ", m.group("metin") or "")
+            sm = re.search(r"([5-9]|1[0-2])\s*\.?\s*s[ıi]n[ıi]f", _normalize(metin))
+            if sm:
+                sinif = int(sm.group(1))
+            # Dosya adında yıl geçiyorsa (ör. "..._2019.pdf") onu tercih et
+            ym = re.search(r"(?<!\d)(20[0-2][0-9])(?!\d)", href)
+            if ym:
+                yil = int(ym.group(1))
+        if yil is None or sinif is None:
+            continue
+        if not (5 <= sinif <= 8) or not (2010 <= yil <= 2100):
+            continue
+        bulunan.setdefault((yil, sinif), tam)
+
+    _not(f"{link_sayisi} bağlantı tarandı, {pdf_sayisi} tanesi PDF.")
+    if bulunan:
+        _yillar = sorted({y for y, _s in bulunan})
+        _not(f"Bulunan yıllar: {', '.join(str(y) for y in _yillar)}.")
+    else:
         _yil_sayisi = len(re.findall(r"20[0-9]{2}\s*y[ıi]l[ıi]", html, re.IGNORECASE))
         _not(
-            f"Sayfada {_toplam_link} bağlantı ve {_yil_sayisi} yıl başlığı görüldü, "
-            "ama hiçbiri 'X. Sınıf' kalıbıyla eşleşmedi. Sayfanın yapısı değişmiş olabilir."
+            f"Sayfada {link_sayisi} bağlantı ({pdf_sayisi} PDF) ve {_yil_sayisi} yıl "
+            "başlığı görüldü ama sınıf/yıl eşleştirilemedi. Sayfanın yapısı "
+            "değişmiş olabilir."
         )
     return bulunan
 
