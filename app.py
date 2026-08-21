@@ -48,8 +48,29 @@ os.makedirs(PDF_DIR, exist_ok=True)
 PRIVATE_DIR = os.path.join(BASE_DIR, "private_pdfs")
 os.makedirs(PRIVATE_DIR, exist_ok=True)
 
-db.init_db()
-db.ensure_default_admin(config.ADMIN_USERNAME, "Yönetici", config.ADMIN_PASSWORD)
+@st.cache_resource(show_spinner=False)
+def _veritabanini_hazirla():
+    """Tabloları oluşturur ve yönetici hesabını hazırlar -- SADECE BİR KEZ.
+
+    ÖNEMLİ - YAVAŞLIĞIN ASIL SEBEBİ BURASIYDI: Bu iki satır doğrudan dosyanın
+    içinde duruyordu. Streamlit ise her tıklamada sayfanın TAMAMINI baştan
+    çalıştırdığı için, her tuşa basışta yeniden çalışıyorlardı. Ölçüldü: tek
+    bir ekran yenilemesinde 7 adet CREATE TABLE, 4 ALTER TABLE ve 5 kategori
+    ekleme komutu, toplam ~30 komut Frankfurt'taki sunucuya gidip geliyordu.
+    Kendi bilgisayarındaki dosyada bu neredeyse bedavaydı, o yüzden hiç fark
+    edilmiyordu; ama internet üzerinden her komut ~50 ms demek ve tek tıklama
+    1,5-3 saniye sürüyordu.
+
+    Üstelik daha kötüsü: bu komutlar veriyi DEĞİŞTİREN işlem sayıldığı için
+    okuma önbelleğini de her seferinde siliyorlardı -- yani eklediğim önbellek
+    hiç işe yaramıyordu.
+
+    st.cache_resource sayesinde artık uygulama ömrü boyunca yalnızca bir kez
+    çalışıyor."""
+    db.init_db()
+    db.ensure_default_admin(config.ADMIN_USERNAME, "Yönetici", config.ADMIN_PASSWORD)
+    return True
+
 
 # --- 8. Sınıf LGS için resmi ders/soru sayısı/katsayı yapısı (sabit) ---
 LGS_SUBJECTS = {
@@ -590,6 +611,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 inject_css()
+
+# Tablolar ve yönetici hesabı: uygulama ömrü boyunca yalnızca BİR KEZ hazırlanır
+# (bkz. _veritabanini_hazirla üstündeki açıklama). st.set_page_config'ten sonra
+# çağrılıyor, çünkü Streamlit onun ilk komut olmasını şart koşuyor.
+_veritabanini_hazirla()
 
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
