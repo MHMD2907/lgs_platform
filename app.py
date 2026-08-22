@@ -59,7 +59,7 @@ os.makedirs(PRIVATE_DIR, exist_ok=True)
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-22.1"
+SURUM = "2026-08-22.2"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -2946,6 +2946,24 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         _bar.progress(_oran, text=f"{_baslik}: cevap anahtarı okunuyor...")
                         _key, _kmsg, _kidx = parsing.extract_answer_key(_ham, _yapi_satir)
                         if _key is None:
+                            # ÖNEMLİ - ASIL SORUN BUYDU: Kod "her ders 25 soru,
+                            # toplam 100" diye SABİT bir yapı bekliyordu. Ama
+                            # bursluluk kitapçıklarında soru sayısı yıla ve
+                            # sınıfa göre değişiyor -- 2024 5. sınıfta her ders
+                            # 20 soru (toplam 80). Cevaplar doğru okunuyor,
+                            # sonra "100 bekliyordum, 80 buldum" denip HEPSİ
+                            # atılıyordu. Artık soru sayısı VARSAYILMIYOR:
+                            # cevap anahtarı sayfasındaki ders başlıkları ve
+                            # her sütundaki cevap sayısı SAYFADAN öğreniliyor.
+                            try:
+                                _kesif, _kidx2, _kmsg2 = parsing.anahtar_kesfet(_ham)
+                            except Exception as _ex:
+                                _kesif, _kidx2, _kmsg2 = None, None, str(_ex)
+                            if _kesif:
+                                _yapi_satir = [(_d, len(_v)) for _d, _v in _kesif.items()]
+                                _key, _kidx = _kesif, _kidx2
+                                _kmsg = _kmsg2
+                        if _key is None:
                             # ÖNEMLİ - "HER FARKLI PDF İÇİN KOD MU YAZACAĞIZ?"
                             # Hayır. Cevap anahtarı okunamayan kitapçık artık
                             # ÇÖPE GİTMİYOR: dosya saklanıyor ve aşağıdaki
@@ -2990,7 +3008,12 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         if _uy:
                             _bl_flash.append(("error", _uy))
                         _ekl += 1
-                        _bl_flash.append(("success", f"✅ {_baslik}: eklendi." + _compression_note(_guvenli)))
+                        _ozet = " + ".join(f"{_d} {_c}" for _d, _c in _yapi_satir)
+                        _bl_flash.append((
+                            "success",
+                            f"✅ {_baslik}: eklendi ({_ozet} = {sum(c for _n, c in _yapi_satir)} soru)."
+                            + _compression_note(_guvenli),
+                        ))
                     _bar.empty()
                     _bl_flash.insert(0, (
                         "success",

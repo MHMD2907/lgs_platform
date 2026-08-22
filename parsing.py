@@ -23,7 +23,7 @@ import tempfile
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-22.1"
+SURUM = "2026-08-22.2"
 from PyPDF2 import PdfReader, PdfWriter
 
 try:
@@ -538,3 +538,228 @@ def cevap_anahtari_bul(pdf_yolu, subjects, tara=14):
         f"Cevap anahtarı sayfası bulundu ama {toplam_soru} cevap "
         f"eşleştirilemedi. PDF'in düzeni beklenenden farklı."
     ), (adaylar[0] if adaylar else None)
+
+
+# =====================================================================
+#  CEVAP ANAHTARINI "KEŞFEDEREK" OKUMA
+# =====================================================================
+# ONEMLI - GERCEK SORUN BUYDU: Bursluluk kitapciklarinda soru sayisi
+# yillara ve siniflara gore DEGISIYOR. Kod "her ders 25 soru, toplam 100"
+# diye sabit bir sey bekliyordu; 2024 5. sinif kitapciginda ise her ders
+# 20 soru (toplam 80) vardi. Anahtar sayfasi dogru bulunuyor, cevaplar
+# dogru okunuyor, ama "100 cevap bekliyordum, 80 buldum" denip HEPSI
+# reddediliyordu.
+#
+# Cozum: soru sayisini VARSAYMAK yerine SAYFADAN OGRENMEK. Bu fonksiyon
+# cevap anahtari sayfasindaki DERS BASLIKLARINI (TURKCE, MATEMATIK,
+# FEN BILIMLERI, SOSYAL BILGILER...) ve her birinin altindaki cevaplari
+# bulur; kac ders varsa, her derste kac soru varsa oyle dondurur.
+
+_DERS_TAKMALARI = {
+    "Türkçe": ["Türkçe"],
+    "Matematik": ["Matematik"],
+    "Fen Bilimleri": ["Fen Bilimleri", "Fen ve Teknoloji", "Fen Bilgisi"],
+    "Sosyal Bilgiler": ["Sosyal Bilgiler"],
+    "T.C. İnkılap Tarihi ve Atatürkçülük": [
+        "T.C. İnkılap Tarihi ve Atatürkçülük", "İnkılap Tarihi ve Atatürkçülük",
+        "TC İnkılap Tarihi", "İnkılap Tarihi", "İnkılâp Tarihi", "İnkılap", "İnkılâp",
+    ],
+    "Din Kültürü ve Ahlak Bilgisi": [
+        "Din Kültürü ve Ahlak Bilgisi", "Din Kültürü", "Din Kültürü ve Ahlak",
+    ],
+    "İngilizce": ["İngilizce", "Yabancı Dil (İngilizce)", "Yabancı Dil"],
+}
+_TR_KATLAMA = str.maketrans("ÇçĞğİıÖöŞşÜüÂâÎîÛû", "CcGgIiOoSsUuAaIiUu")
+
+
+def _kat(s):
+    return re.sub(r"[^0-9A-Za-z]", "", (s or "").translate(_TR_KATLAMA)).upper()
+
+
+def _isiz(s):
+    return re.sub(r"[Ii]", "", _kat(s))
+
+
+def _ders_tani(metin):
+    """Bir metin parçası hangi derse ait? Bulamazsa None."""
+    if not metin:
+        return None
+    hedef, hedef_i = _kat(metin), _isiz(metin)
+    adaylar = sorted(
+        ((t, d) for d, ts in _DERS_TAKMALARI.items() for t in ts),
+        key=lambda x: len(x[0]), reverse=True,
+    )
+    for takma, ders in adaylar:
+        if _kat(takma) and _kat(takma) in hedef:
+            return ders
+    for takma, ders in adaylar:                       # bozuk "İ" harfi ihtimali
+        t = _isiz(takma)
+        if len(t) >= 5 and t in hedef_i:
+            return ders
+    return None
+
+
+def _ders_tani_kesin(metin):
+    """Metnin TAMAMI bir ders adı mı? (başlık sütunlarını ayırmak için)"""
+    if not metin:
+        return None
+    hedef, hedef_i = _kat(metin), _isiz(metin)
+    if len(hedef) < 3:
+        return None
+    for ders, takmalar in _DERS_TAKMALARI.items():
+        for t in takmalar:
+            if _kat(t) == hedef:
+                return ders
+    for ders, takmalar in _DERS_TAKMALARI.items():
+        for t in takmalar:
+            ti = _isiz(t)
+            if len(ti) >= 5 and ti == hedef_i:
+                return ders
+    return None
+
+
+def _basliklari_bul(page, ust_oran=0.45):
+    """Sayfanın üst kısmındaki DERS SÜTUN BAŞLIKLARINI (ad, x_orta) bulur."""
+    h = page.height
+    ws = [w for w in page.extract_words() if w["top"] < h * ust_oran]
+    if not ws:
+        return []
+    satirlar = {}
+    for w in ws:
+        satirlar.setdefault(round(w["top"] / 5), []).append(w)
+    en_iyi, tum_satirlar = [], []
+    for _k, kelimeler in satirlar.items():
+        kelimeler = sorted(kelimeler, key=lambda w: w["x0"])
+        # ÖNEMLİ - BAŞLIKLARI AYIRMA TUZAĞI: Başlık satırı tek satırda
+        # "TÜRKÇE  MATEMATİK  FEN BİLİMLERİ  SOSYAL BİLGİLER" şeklinde.
+        # Kelimeleri birleştirip "içinde geçiyor mu" diye bakmak yanlış
+        # sonuç veriyordu: "TÜRKÇE MATEMATİK FEN BİLİMLERİ" metninin İÇİNDE
+        # "Fen Bilimleri" geçtiği için dört başlık TEK ders sanılıyordu.
+        # Bu yüzden önce TAM EŞLEŞME aranıyor (birleşik metin, ders adının
+        # kendisi mi?), ancak o tutmazsa başlangıç eşleşmesine bakılıyor.
+        bulunan, i = [], 0
+        while i < len(kelimeler):
+            eslesme = None
+            for kesin in (True, False):
+                for uzunluk in (6, 5, 4, 3, 2, 1):
+                    if i + uzunluk > len(kelimeler):
+                        continue
+                    parca = kelimeler[i:i + uzunluk]
+                    metin = " ".join(p["text"] for p in parca)
+                    ders = _ders_tani_kesin(metin) if kesin else _ders_tani(metin)
+                    if ders:
+                        eslesme = (ders, (parca[0]["x0"] + parca[-1]["x1"]) / 2, uzunluk)
+                        break
+                if eslesme:
+                    break
+            if eslesme:
+                bulunan.append((eslesme[0], eslesme[1]))
+                i += eslesme[2]
+            else:
+                i += 1
+        if len(bulunan) > len(en_iyi):
+            en_iyi = bulunan
+        tum_satirlar.append((min(w["top"] for w in kelimeler), bulunan))
+    if not en_iyi:
+        return []
+    # ÖNEMLİ: Uzun başlıklar ("T.C. İNKILAP TARİHİ VE ATATÜRKÇÜLÜK") bazı
+    # kitapçıklarda İKİ SATIRA sarıyor; o zaman başlıkların hepsi tek satırda
+    # olmuyor. Bu yüzden en çok ders bulunan satırın YAKININDAKİ satırlarda
+    # bulunan dersler de listeye ekleniyor.
+    _ana_top = next((t for t, b in tum_satirlar if b is en_iyi), None)
+    birlesik = list(en_iyi)
+    if _ana_top is not None:
+        for t, b in tum_satirlar:
+            if b is en_iyi or abs(t - _ana_top) > 30:
+                continue
+            birlesik += b
+    # Aynı ders iki kez sayılmasın (en soldaki konum korunur)
+    temiz, gorulen = [], set()
+    for ders, x in sorted(birlesik, key=lambda t: t[1]):
+        if ders not in gorulen:
+            gorulen.add(ders)
+            temiz.append((ders, x))
+    return sorted(temiz, key=lambda t: t[1])
+
+
+def anahtar_kesfet(pdf_yolu, tara=14):
+    """Cevap anahtarını, soru sayısını VARSAYMADAN okur.
+
+    Döner: (cevaplar {ders: [harf,...]}, sayfa_indeksi, mesaj)
+    Bulamazsa (None, sayfa_indeksi_veya_None, sebep)."""
+    adaylar = _anahtar_sayfa_adaylari(pdf_yolu, tara)
+    if not adaylar:
+        return None, None, "Cevap anahtarı sayfası bulunamadı."
+    with pdfplumber.open(pdf_yolu) as pdf:
+        for idx in adaylar:
+            if idx >= len(pdf.pages):
+                continue
+            page = pdf.pages[idx]
+            basliklar = _basliklari_bul(page)
+            if len(basliklar) < 2:
+                continue
+            ikililer = _sayfa_ikilileri(page)
+            if len(ikililer) < 8:
+                continue
+            # Sütun sınırları: iki başlığın ortası
+            sinirlar = [
+                (basliklar[i][1] + basliklar[i + 1][1]) / 2
+                for i in range(len(basliklar) - 1)
+            ]
+
+            def _sutun(x):
+                for i, s in enumerate(sinirlar):
+                    if x < s:
+                        return i
+                return len(sinirlar)
+
+            kovalar = {i: [] for i in range(len(basliklar))}
+            for t in ikililer:
+                kovalar[_sutun(t["x"])].append(t)
+            cevaplar = {}
+            for i, (ders, _x) in enumerate(basliklar):
+                sirali = sorted(kovalar[i], key=lambda t: t["top"])
+                # Aynı soru numarası iki kez okunduysa ilkini al
+                gorulen, liste = set(), []
+                for t in sirali:
+                    if t["num"] in gorulen:
+                        continue
+                    gorulen.add(t["num"])
+                    liste.append(t)
+                liste.sort(key=lambda t: t["num"])
+                nums = [t["num"] for t in liste]
+                if not nums or nums != list(range(1, len(nums) + 1)) or len(nums) < 5:
+                    cevaplar = {}
+                    break
+                cevaplar[ders] = [t["harf"] for t in liste]
+            if cevaplar and len(cevaplar) == len(basliklar):
+                _adet = ", ".join(f"{d}: {len(v)}" for d, v in cevaplar.items())
+                return cevaplar, idx, f"Keşfedildi ({_adet})"
+    return None, adaylar[0], (
+        "Cevap anahtarı sayfasındaki ders başlıkları okunamadı."
+    )
+
+
+def _anahtar_sayfa_adaylari(pdf_yolu, tara=14):
+    """Cevap anahtarı olabilecek sayfa numaraları (sondan başa doğru bakar)."""
+    try:
+        import pypdfium2 as pdfium
+
+        doc = pdfium.PdfDocument(pdf_yolu)
+        try:
+            n = len(doc)
+            adaylar = []
+            for i in range(max(0, n - tara), n):
+                tp = doc[i].get_textpage()
+                try:
+                    metin = (tp.get_text_range() or "").upper()
+                finally:
+                    tp.close()
+                if "CEVAPANAHTARI" in _kat(metin) or \
+                        len(re.findall(r"\d{1,3}\s*[\.\)]\s*[A-D]\b", metin)) >= 15:
+                    adaylar.append(i)
+            return adaylar
+        finally:
+            doc.close()
+    except Exception:
+        return []
