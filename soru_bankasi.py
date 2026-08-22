@@ -32,7 +32,7 @@ import re
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-22.3"
+SURUM = "2026-08-22.4"
 
 DERS_ADLARI = [
     "Türkçe",
@@ -390,8 +390,47 @@ _CEVAP = re.compile(r"(?<!\d)(\d{1,3})\s*[\.\-\)]\s*([A-E])(?![A-Za-zÇĞİÖŞ�
 _CEVAP_BITISIK = re.compile(
     r"(?<!\d)(\d{1,3})\s*[\.\-\)]\s*([A-E])(?![A-Za-zÇĞİÖŞÜçğıöşü])"
 )
+# "Unit 1", "UNIT 3" -- İngilizce bölümlerinde ünite başlığı böyle yazılır
+# (sayı, Türkçe'nin tersine, kelimeden SONRA gelir).
+_UNITE_BASLIK_EN = re.compile(r"(?:UNIT|Unit|unit)\s*[:\.\-]?\s*(\d{1,2})(?!\d)")
 # Kitabın sonundaki geçmiş yıl sınavı bölümünün kapak sayfası
 _MERKEZI = re.compile(r"MERKEZ[İIÎV]?\s*SINAV\s*SORULAR", re.IGNORECASE)
+# İçindekiler sayfası: başlığından ya da "...... 185" biçimindeki
+# nokta dizisi + sayfa numarası satırlarından tanınır.
+_ICINDEKILER = re.compile(r"İÇİNDEKİLER|ICINDEKILER|CONTENTS", re.IGNORECASE)
+_TOC_NOKTALI = re.compile(r"\.{4,}\s*\d{1,3}\b")
+# Bozuk yazı tipinde nokta dizisi "= K = K = K =" gibi görünür
+_TOC_NOKTALI_K = re.compile(r"(?:[=\s]*K){6,}")
+
+
+def _icindekiler_mi(*metinler):
+    """Sayfa bir İÇİNDEKİLER sayfası mı?
+
+    ÖNEMLİ - KULLANICININ SÖZEL KİTABI HİÇ AKTARILAMIYORDU: O kitabın
+    içindekiler sayfasında "2018-2019 Merkezi Sınav Soruları ..... 345"
+    gibi SEKİZ satır var. Program bu satırları görünce daha kitabın 3.
+    sayfasındayken "geçmiş yıl bölümü başladı" sanıp kitabın TAMAMINI
+    atlıyordu; sonuçta 3 dersin (İnkılap, Din Kültürü, İngilizce) hiçbiri
+    eklenemiyordu. Artık içindekiler sayfası baştan tanınıp es geçiliyor."""
+    for m in metinler:
+        if m and _ICINDEKILER.search(m):
+            return True
+    for m in metinler:
+        if m and (len(_TOC_NOKTALI.findall(m)) >= 4
+                  or len(_TOC_NOKTALI_K.findall(m)) >= 4):
+            return True
+    return False
+
+
+def _merkezi_kapak_mi(duz, duz_k):
+    """Sayfa, geçmiş yıl merkezî sınav bölümünün KAPAĞI mı?
+
+    Sadece ifadeyi aramak yetmiyordu (bkz. _icindekiler_mi). Kapak
+    sayfaları kısadır; uzun bir metin sayfasında geçen aynı ifade
+    bölümün başladığı anlamına gelmez."""
+    if not (_MERKEZI.search(duz or "") or _MERKEZI.search(duz_k or "")):
+        return False
+    return len((duz or "").split()) <= 150
 
 
 def _duz(s):
@@ -428,12 +467,22 @@ def _anahtar_bloklari(metin):
     Döner: {unite_no: {"tur": "Ünite"/"Tema", "cevaplar": {soru_no: harf}}}
     (ünite başlığı hiç yoksa boş sözlük -> bu bir merkezî sınav anahtarıdır)"""
     bloklar = {}
+    ham = metin
     yerler = [(m.start(), int(m.group(1)), m.group(2)) for m in _UNITE_BASLIK.finditer(metin)]
+    if not yerler:
+        # İngilizce bölümü: "Unit 1", "Unit 2" ... (sayı kelimeden SONRA).
+        # ÖNEMLİ: Orijinal metinde aranır -- kaydırma onarımı düzgün
+        # yazılmış İngilizce başlıkları bozar.
+        yerler = [(m.start(), int(m.group(1)), "Ünite")
+                  for m in _UNITE_BASLIK_EN.finditer(ham)]
     if not yerler:
         # Başlıklar kaydırılmış yazı tipiyle basılmış olabilir
         metin = _kaydirmayi_coz(metin)
         yerler = [(m.start(), int(m.group(1)), m.group(2))
                   for m in _UNITE_BASLIK.finditer(metin)]
+    if not yerler:
+        yerler = [(m.start(), int(m.group(1)), "Ünite")
+                  for m in _UNITE_BASLIK_EN.finditer(metin)]
     if not yerler:
         return {}
     # ÖNEMLİ - TABLO DÜZENİ: Bazı kitaplarda (kullanıcının Fen kitabı gibi)
@@ -665,6 +714,10 @@ _TOC_SATIRI = re.compile(
     r"(?:Ünite|ÜNİTE|ünite|Tema|TEMA|tema|Bölüm|BÖLÜM|hQLWH|7HPD|%|OP)"
     r"[\s=]*[:\.\-]?[\s=]*(.*)$"
 )
+# İngilizce içindekiler satırı: "Unit 3: In the Kitchen ....... 231"
+_TOC_SATIRI_EN = re.compile(
+    r"^\s*(?:Unit|UNIT|unit)\s*[:\.\-]?\s*(\d{1,2})\s*[:\.\-]?\s*(.*)$"
+)
 
 
 def _ad_temizle(ad):
@@ -720,15 +773,38 @@ def _unite_adlari(doc, tarama=20):
 
     ÖLÇÜLDÜ: Bazı kitaplarda '1. Ünite' ile konu adı AYRI SATIRLARDA
     yazılıyor; bu yüzden başlık bulunduğunda konu adı aynı satırda yoksa
-    bir SONRAKİ satıra bakılıyor."""
-    adlar = {}
+    bir SONRAKİ satıra bakılıyor.
+
+    ÇOK DERSLİ KİTAPLAR (sözel kitabı gibi): İçindekilerde her dersin
+    üniteleri 1'den yeniden başlar -- İnkılap'ın 1. ünitesi de var, Din
+    Kültürü'nün 1. ünitesi de. Adlar sadece numaraya göre saklanırsa
+    Din Kültürü'nün 1. ünitesi "Bir Kahraman Doğuyor" diye görünürdü.
+    Bu yüzden içindekiler taranırken hangi dersin altında olunduğu da
+    takip edilip adlar (ders, numara) çiftine göre saklanıyor.
+
+    Döner: {"ders": {(ders, no): ad}, "genel": {no: ad}, "_ders": son_ders}"""
+    adlar = {"ders": {}, "genel": {}, "_ders": None}
     for i in range(min(tarama, len(doc))):
-        _sayfa = _sayfa_metni(doc, i)
+        _unite_adlari_sayfa(adlar, _sayfa_metni(doc, i))
+    return adlar
+
+
+def _unite_adlari_sayfa(adlar, _sayfa):
+    """Tek bir içindekiler sayfasını okuyup `adlar` sözlüğünü büyütür.
+
+    Çok dersli kitaplarda her dersin kendi içindekiler sayfası kitabın
+    ortasında olabiliyor; bu yüzden ana tarama sırasında karşılaşılan
+    içindekiler sayfaları da buraya veriliyor."""
+    ders_adlari, genel = adlar["ders"], adlar["genel"]
+    su_ders = adlar.get("_ders")
+    bu_sayfa, sayfa_dersleri = [], []
+    if True:
         # ÖNEMLİ: Cevap anahtarı sayfası da "1. Ünite" başlığı taşır ve hemen
         # altında cevaplar gelir. İçindekiler sanılırsa ünite adı
         # "1. Ünite · 1. C 2. A 3. B" gibi saçma çıkıyordu. Bu sayfalar atlanır.
         if "CEVAPANAHTARI" in _sadece_harfler(_sayfa):
-            continue
+            adlar["_ders"] = su_ders
+            return adlar
         ham = _sayfa.splitlines()
         # Her satırı ayrı ayrı, en okunur hâline getir
         satirlar = []
@@ -739,12 +815,24 @@ def _unite_adlari(doc, tarama=20):
         for k, adaylar in enumerate(satirlar):
             no, ad_adaylari = None, []
             for okunus in adaylar:
-                m = _TOC_SATIRI.match(okunus)
+                m = _TOC_SATIRI.match(okunus) or _TOC_SATIRI_EN.match(okunus)
                 if not m:
                     continue
                 no = int(m.group(1))
                 ad_adaylari.append(_ad_temizle(m.group(2) or ""))
-            if no is None or no in adlar or not (1 <= no <= 30):
+            if no is None:
+                # Ünite satırı değil: ders başlığı olabilir mi?
+                for okunus in adaylar:
+                    _d = _ders_bul_kesin(okunus)
+                    if _d and len(_duz(okunus)) <= 60:
+                        su_ders = _d
+                        if _d not in sayfa_dersleri:
+                            sayfa_dersleri.append(_d)
+                        break
+                continue
+            if not (1 <= no <= 30):
+                continue
+            if no in genel and (su_ders, no) in ders_adlari:
                 continue
             if not any(ad_adaylari) and k + 1 < len(satirlar):
                 ad_adaylari = [_ad_temizle(x) for x in satirlar[k + 1]]
@@ -753,8 +841,35 @@ def _unite_adlari(doc, tarama=20):
                 continue
             en_iyi = max(ad_adaylari, key=_ad_puani)
             if _ad_puani(en_iyi) >= 4:
-                adlar[no] = _kelime_onar(en_iyi)
+                _ad = _kelime_onar(en_iyi)
+                genel.setdefault(no, _ad)
+                bu_sayfa.append((no, _ad))
+                if su_ders:
+                    ders_adlari.setdefault((su_ders, no), _ad)
+    # DERS BAŞLIĞI SAYFANIN İÇİNDE GEÇ GÖRÜNMÜŞ OLABİLİR: Bazı kitaplarda
+    # "MATEMATİK" başlığı, ilk ünite satırıyla AYNI satırda basılı; o
+    # yüzden ünite adları okunurken hangi derste olduğumuz henüz belli
+    # değil. Sayfada TEK ders adı geçiyorsa adlar geriye dönük o derse
+    # yazılır. Birden fazla ders varsa (iki sütunlu içindekiler) karışma
+    # riski olduğu için dokunulmaz -- yanlış ad, adsızlıktan kötüdür.
+    if len(sayfa_dersleri) == 1:
+        for no, _ad in bu_sayfa:
+            ders_adlari.setdefault((sayfa_dersleri[0], no), _ad)
+    adlar["_ders"] = su_ders
     return adlar
+
+
+def _unite_adi(adlar, ders, no, tek_ders):
+    """Ünite adını seçer. Çok dersli kitapta YANLIŞ ad göstermektense
+    hiç ad göstermemeyi tercih ediyoruz."""
+    if not adlar:
+        return None
+    _d = (adlar.get("ders") or {}).get((ders, no))
+    if _d:
+        return _d
+    if tek_ders:
+        return (adlar.get("genel") or {}).get(no)
+    return None
 
 
 _SESLI = set("aeıioöuüAEIİOÖUÜ")
@@ -960,7 +1075,8 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
             for unite_no, bolum in eslesme:
                 blok = acik_kayit["bloklar"][unite_no]
                 cevaplar, tur = blok["cevaplar"], blok.get("tur") or "Ünite"
-                ad = adlar.get(unite_no)
+                ad = _unite_adi(adlar, ders, unite_no,
+                                len((adlar.get("ders") or {})) == 0)
                 kok = f"{unite_no}. {tur}" + (f" · {ad}" if ad else "")
                 parcalar = _parcala(bolum, cevaplar, parca_soru)
                 for pno, parca in enumerate(parcalar, start=1):
@@ -982,14 +1098,38 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
             metin = _sayfa_metni(doc, i)
             duz = _duz(metin)
             duz_k = _duz(_kaydirmayi_coz(metin))
-            if _MERKEZI.search(duz) or _MERKEZI.search(duz_k):
+            # ÖNEMLİ: İçindekiler sayfası bölüm kapağı ya da cevap anahtarı
+            # SAYILMAZ. Ama sayfayı komple atmıyoruz -- ölçüldü: Türkçe
+            # kitabında "içindekiler" konulu bir SORU sayfası da bu tarife
+            # uyuyor ve atıldığında o ünitenin soru numaraları kopup ünite
+            # komple kayboluyordu. Sayfa gövdede kalır; sahte bölümleri
+            # zaten "1'den başlamalı ve numara atlamamalı" kuralı eliyor.
+            _toc = _icindekiler_mi(duz, duz_k)
+            if _toc and i >= 20:
+                # Çok dersli kitaplarda ikinci/üçüncü dersin içindekiler
+                # sayfası kitabın ortasındadır; ünite adları oradan gelir.
+                try:
+                    _unite_adlari_sayfa(adlar, metin)
+                except Exception:
+                    pass
+            if not _toc and _merkezi_kapak_mi(duz, duz_k):
                 # Geçmiş yıl LGS soruları bölümü -> kullanıcı istemiyor, atla
+                if not merkezi_basladi:
+                    uyarilar.append(
+                        "ℹ️ Kitabın sonundaki **geçmiş yıl merkezî sınav soruları** "
+                        "bölümü bilerek alınmadı. O sınavların tamamını, resmî ve "
+                        "eksiksiz hâliyle **Otomatik İndirme (Resmî EBA Arşivi)** "
+                        "bölümünden tek tuşla ekleyebilirsiniz."
+                    )
                 merkezi_basladi = True
                 _kapat(acik)
                 acik, govde = None, []
                 continue
-            if ("CEVAPANAHTARI" in _sadece_harfler(duz)
-                    or "CEVAPANAHTARI" in _sadece_harfler(duz_k)):
+            _harfler = _sadece_harfler(duz)
+            _harfler_k = _sadece_harfler(duz_k)
+            if not _toc and ("CEVAPANAHTARI" in _harfler or "CEVAPANAHTARI" in _harfler_k
+                             # İngilizce bölümlerinde başlık "Answer Key" olur
+                             or "ANSWERKEY" in _harfler or "ANSWERKEY" in _harfler_k):
                 bloklar = _anahtar_bloklari(metin)
                 if not bloklar:
                     _kapat(acik)

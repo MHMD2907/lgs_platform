@@ -59,7 +59,7 @@ os.makedirs(PRIVATE_DIR, exist_ok=True)
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-22.3"
+SURUM = "2026-08-22.4"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -2558,7 +2558,8 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     "atlıyor. Kitabın **tam sürümünü** bulursanız aynı işlem hepsini ekler."
                   )
                 for _u in st.session_state.get("_qb_uyarilar", []):
-                    st.warning(_u)
+                    # "ℹ️" ile başlayanlar hata değil, bilgi notudur.
+                    (st.info if str(_u).startswith("ℹ️") else st.warning)(_u)
                 if not _eklenebilir:
                     st.error("Cevap anahtarı okunabilen test yok, ekleme yapılamıyor.")
                 else:
@@ -3586,8 +3587,76 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                 st.info("Henüz kayıtlı deneme yok.")
             else:
                 st.caption(f"Toplam **{len(all_exams)}** kayıtlı deneme/test var.")
-            for e in all_exams:
-                c1, c2, c3, c4 = st.columns([4, 2, 1, 2])
+
+            # ---- Süzgeç + toplu silme --------------------------------
+            # KULLANICI İSTEĞİ: "yanlış eklenenleri vb daha kolay silmek
+            # için seçerek veya toplu sil butonu". Tek tek silmek, bir
+            # kitaptan 17 test eklendiğinde 17 tıklama demekti.
+            _sf1, _sf2 = st.columns([1, 2])
+            _kats = ["Hepsi"] + sorted({e["category"] for e in all_exams})
+            _kat_sec = _sf1.selectbox("Bölüm", _kats, key="_kd_kat")
+            _ara = _sf2.text_input("Ada göre ara", key="_kd_ara",
+                                   placeholder="örn. 2. Ünite, Bursluluk, KPSS...")
+            _liste = [
+                e for e in all_exams
+                if (_kat_sec == "Hepsi" or e["category"] == _kat_sec)
+                and (not _ara or _ara.strip().lower() in (e["title"] or "").lower())
+            ]
+            if len(_liste) != len(all_exams):
+                st.caption(f"Süzgeçten geçen: **{len(_liste)}** deneme.")
+
+            _hepsi_key = "_kd_hepsi"
+
+            def _kd_hepsini_isaretle(_ids=tuple(e["id"] for e in _liste)):
+                _deger = st.session_state.get(_hepsi_key, False)
+                for _i in _ids:
+                    st.session_state[f"_kd_sec_{_i}"] = _deger
+
+            st.checkbox(f"☑️ Aşağıdaki {len(_liste)} denemenin hepsini seç",
+                        key=_hepsi_key, on_change=_kd_hepsini_isaretle)
+            _secili = [e for e in _liste if st.session_state.get(f"_kd_sec_{e['id']}")]
+
+            # ÖNEMLİ - ÖLÇÜLDÜ: Onay adımına geçmek için st.rerun() çağırınca
+            # Streamlit, o çalıştırmada ekrana çizilmemiş kutucukların
+            # durumunu SİLİYOR; seçim kayboluyor ve onay penceresi hiç
+            # açılmıyordu. Bu yüzden seçilenler, kutucuklardan bağımsız
+            # ayrı bir listede saklanıyor.
+            _bekleyen = st.session_state.get("_kd_onay") or []
+            if _bekleyen:
+                st.error(
+                    f"**{len(_bekleyen)} deneme** ve bunlara ait **tüm çözüm "
+                    f"sonuçları** silinecek. Bu işlem geri alınamaz."
+                )
+                st.caption("Silinecekler: " + ", ".join(t for _i, t in _bekleyen[:8])
+                           + (" ..." if len(_bekleyen) > 8 else ""))
+                _o1, _o2, _o3 = st.columns([1, 1, 3])
+                if _o1.button("Evet, sil", type="primary", use_container_width=True):
+                    _n = 0
+                    for _id, _t in _bekleyen:
+                        try:
+                            db.delete_exam(_id)
+                            _n += 1
+                        except Exception:
+                            pass
+                        st.session_state.pop(f"_kd_sec_{_id}", None)
+                    st.session_state.pop("_kd_onay", None)
+                    st.session_state["_admin_flash"] = [
+                        ("success", f"🗑️ {_n} deneme silindi.")]
+                    st.rerun()
+                if _o2.button("Vazgeç", use_container_width=True):
+                    st.session_state.pop("_kd_onay", None)
+                    st.rerun()
+            elif _secili:
+                if st.button(f"🗑️ Seçilen {len(_secili)} denemeyi sil",
+                             type="primary"):
+                    st.session_state["_kd_onay"] = [(e["id"], e["title"]) for e in _secili]
+                    st.rerun()
+            st.divider()
+
+            for e in _liste:
+                c0, c1, c2, c3, c4 = st.columns([0.5, 4, 2, 1, 2])
+                c0.checkbox("Seç", key=f"_kd_sec_{e['id']}",
+                            label_visibility="collapsed")
                 c1.write(f"**{e['title']}**  ·  {e['category']}  ·  {e['source']}")
                 c2.write(e["created_at"])
                 if c3.button("Sil", key=f"del_{e['id']}"):

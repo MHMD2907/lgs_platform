@@ -22,7 +22,7 @@ from datetime import datetime
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lgs_platform.db")
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-22.3"
+SURUM = "2026-08-22.4"
 
 DEFAULT_CATEGORIES = [
     "8. Sınıf (LGS)",
@@ -854,6 +854,15 @@ def delete_exam(exam_id):
         conn.execute("DELETE FROM exam_files WHERE exam_id = ?", (exam_id,))
     except Exception:
         pass  # eski veritabanlarında bu tablo olmayabilir
+    # ÖNEMLİ: Denemeye ait ÇÖZÜM KAYITLARI da silinir. Eskiden bunlar
+    # kalıyordu; "Gelişim Raporum" sayfasında adı okunamayan, açılmayan
+    # hayalet satırlar olarak görünüyorlardı.
+    for _sql in ("DELETE FROM results WHERE exam_id = ?",
+                 "DELETE FROM in_progress WHERE exam_id = ?"):
+        try:
+            conn.execute(_sql, (exam_id,))
+        except Exception:
+            pass
     conn.commit()
     conn.close()
     if row:
