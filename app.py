@@ -59,7 +59,7 @@ os.makedirs(PRIVATE_DIR, exist_ok=True)
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-22.2"
+SURUM = "2026-08-22.3"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -1043,7 +1043,8 @@ def _pdf_bolumu(pdf_path, baslik, height=780):
 
 
 @_fragman
-def _optik_form(exam_id, attempt_no, student_name, aktif_yapi, aktif_anahtar, ikinci_sans):
+def _optik_form(exam_id, attempt_no, student_name, aktif_yapi, aktif_anahtar,
+                ikinci_sans, tam_anahtar=None):
     """Optik form -- kendi basina yenilenen bagimsiz bir parca.
 
     ONEMLI - HIZ: Her sik isaretlemesi eskiden SAYFANIN TAMAMINI yeniden
@@ -1095,7 +1096,29 @@ def _optik_form(exam_id, attempt_no, student_name, aktif_yapi, aktif_anahtar, ik
         for subject in subjects
     ]
     user_answers = {section: {} for section in aktif_yapi}
-    options = ["A", "B", "C", "D", "Boş"]
+
+    # ÖNEMLİ - 5 ŞIKLI SINAVLAR (KPSS/ALES/YDS): Şık listesi eskiden
+    # "A B C D" olarak SABİTTİ. LGS ve bursluluk 4 şıklı olduğu için
+    # sorun çıkmıyordu; ama KPSS gibi 5 şıklı bir sınav eklendiğinde
+    # çocuk "E" cevabını İŞARETLEYEMİYOR, cevabı E olan her soru
+    # zorunlu olarak yanlış/boş sayılıyordu. Artık şık sayısı, o
+    # dersin cevap anahtarına bakılarak DERS DERS belirleniyor:
+    # anahtarda "E" geçen derste 5 şık, geçmeyende 4 şık gösterilir.
+    def _dersin_sikleri(section, subject):
+        # Düzeltme turunda elimizdeki anahtar sadece seçili soruları
+        # içerir; o soruların hiçbirinin cevabı E değilse şık sayısı
+        # yanlışlıkla 4'e düşerdi. Bu yüzden önce denemenin TAM
+        # anahtarına bakılıyor.
+        _harfler = set()
+        try:
+            _bolum = ((tam_anahtar or aktif_anahtar) or {}).get(section) or {}
+            for _h in (_bolum.get(subject) or []):
+                if isinstance(_h, str):
+                    _harfler.add(_h.strip().upper())
+        except Exception:
+            pass
+        _son = "E" if "E" in _harfler else "D"
+        return [c for c in "ABCDE" if c <= _son] + ["Boş"]
 
     # PDF görüntüleyici ile aynı yükseklikte, kaydırılabilir bir
     # kutu içinde gösteriliyor -- böylece PDF bittiğinde Optik
@@ -1117,6 +1140,8 @@ def _optik_form(exam_id, attempt_no, student_name, aktif_yapi, aktif_anahtar, ik
                 # okurken formda 1. soruyu işaretler ve her şey
                 # kayar. "numbers" yoksa normal 1, 2, 3... kullanılır.
                 numaralar = _meta.get("numbers") or list(range(1, count + 1))
+                options = _dersin_sikleri(section, subject)
+                _bos_index = options.index("Boş")
                 saved_subject = saved.get(section, {}).get(subject, [])
                 if numaralar and numaralar[0] != 1:
                     st.caption(
@@ -1126,7 +1151,7 @@ def _optik_form(exam_id, attempt_no, student_name, aktif_yapi, aktif_anahtar, ik
                 answers = []
                 for _sira, _soru_no in enumerate(numaralar):
                     prev = saved_subject[_sira] if _sira < len(saved_subject) else "Boş"
-                    default_index = options.index(prev) if prev in options else 4
+                    default_index = options.index(prev) if prev in options else _bos_index
                     ans = st.radio(
                         f"{subject} - Soru {_soru_no}",
                         options,
@@ -2155,6 +2180,7 @@ if aktif_bolum == SEK_SINAV:
                 _optik_form(
                     selected_exam_id, attempt_no, student_name,
                     aktif_yapi, aktif_anahtar, bool(_wrong_sel),
+                    tam_anahtar=answer_key,
                 )
 
 
@@ -2751,58 +2777,138 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
 
         # ---------------- Diğer kategori / manuel ----------------
         elif admin_section == "Diğer Kategori / Soru Bankası Ekle (Manuel)":
-            st.markdown("6. Sınıf, 7. Sınıf, İOKBS (Bursluluk) veya konu bazlı soru bankası testleri için kullanın.")
+            st.markdown(
+                "**Her türlü sınav buradan eklenir** — 6/7. sınıf denemeleri, bursluluk, "
+                "konu testleri, hatta **KPSS, ALES, YDS** gibi sınavlar. Ayrı bir bölüm "
+                "açmaya gerek yok: yeni bir **kategori adı** yazın (örn. *KPSS*), sınav "
+                "oraya eklensin.\n\n"
+                "Sistem PDF'i tarayıp **hangi dersler var, her birinde kaç soru var ve "
+                "cevaplar neler** — hepsini kendi bulmayı dener. Cevap anahtarı **ayrı bir "
+                "PDF'teyse** (ÖSYM sınavlarında genelde öyledir) onu da aşağıya yükleyin."
+            )
             cats = db.get_categories()
             other_cats = [c for c in cats if c != LGS_CATEGORY] or cats
             colc1, colc2 = st.columns([2, 1])
             with colc1:
                 gcat = st.selectbox("Kategori", other_cats, key="gen_cat")
             with colc2:
-                new_cat = st.text_input("Yeni kategori adı (opsiyonel)")
+                new_cat = st.text_input("Yeni kategori adı (örn. KPSS)")
                 if st.button("Kategori Ekle") and new_cat:
                     db.add_category(new_cat)
                     st.rerun()
 
-            uploaded = st.file_uploader("Test PDF'i (opsiyonel; sadece cevap anahtarı da girebilirsiniz)", type=["pdf"], key="gen_pdf")
+            _u1, _u2 = st.columns(2)
+            uploaded = _u1.file_uploader(
+                "📘 Soru kitapçığı PDF'i", type=["pdf"], key="gen_pdf")
+            key_pdf = _u2.file_uploader(
+                "🔑 Cevap anahtarı AYRI PDF'te ise (isteğe bağlı)", type=["pdf"], key="gen_key_pdf",
+                help="ÖSYM sınavlarında cevap anahtarı ayrı yayımlanır. Boş bırakırsanız "
+                     "anahtar, kitapçığın kendi sayfalarında aranır.")
+
+            # ---- Otomatik keşif ----
+            # ÖNEMLİ: Eskiden ders adlarını ve soru sayılarını ELLE yazmak
+            # gerekiyordu; KPSS gibi 120 soruluk sınavlarda bu hem zahmetli
+            # hem hataya açıktı. Artık cevap anahtarı sayfasındaki ders
+            # başlıkları okunup her şey otomatik dolduruluyor.
+            _kesif = st.session_state.get("_man_kesif")
+            if uploaded or key_pdf:
+                if st.button("🔎 PDF'i tara — dersleri ve cevapları otomatik bul",
+                             type="primary", use_container_width=True, key="_man_tara"):
+                    _kaynak = key_pdf or uploaded
+                    _gecici = os.path.join(PRIVATE_DIR, "_manuel_tarama.pdf")
+                    try:
+                        _kaynak.seek(0)
+                        with open(_gecici, "wb") as _f:
+                            _f.write(_kaynak.read())
+                        _kaynak.seek(0)
+                        with st.spinner("PDF taranıyor: dersler ve cevap anahtarı aranıyor..."):
+                            _cev, _idx, _msj = parsing.anahtar_kesfet(_gecici)
+                        if _cev:
+                            st.session_state["_man_kesif"] = {
+                                "cevaplar": _cev, "sayfa": _idx,
+                                "ayri": key_pdf is not None, "mesaj": _msj,
+                            }
+                            st.session_state["_islem_balon"] = True
+                        else:
+                            st.session_state["_man_kesif"] = None
+                            st.session_state["_man_hata"] = _msj
+                    except Exception as _e:
+                        st.session_state["_man_kesif"] = None
+                        st.session_state["_man_hata"] = str(_e)
+                    st.rerun()
+            if st.session_state.pop("_man_hata", None):
+                st.warning(
+                    "Cevap anahtarı otomatik bulunamadı. Aşağıya dersleri ve cevapları "
+                    "elle girebilirsiniz — kayıt yine sorunsuz yapılır."
+                )
+            if _kesif:
+                _kt = ", ".join(f"**{d}** {len(v)} soru" for d, v in _kesif["cevaplar"].items())
+                st.success(
+                    f"✅ Bulundu: {_kt}  ·  toplam "
+                    f"**{sum(len(v) for v in _kesif['cevaplar'].values())} soru**"
+                    + ("  ·  anahtar ayrı dosyadan okundu." if _kesif["ayri"]
+                       else f"  ·  anahtar kitapçığın {(_kesif['sayfa'] or 0) + 1}. sayfasında "
+                            f"(o sayfa ve sonrası öğrenciye gösterilmez).")
+                )
+                if st.button("↩️ Tarama sonucunu temizle, elle gireyim", key="_man_temizle"):
+                    st.session_state.pop("_man_kesif", None)
+                    st.rerun()
+
             default_title, default_subject = ("", None)
             if uploaded:
                 default_title, default_subject = guess_title_and_subject(uploaded.name)
-
             title = st.text_input("Test Adı", value=default_title, key="gen_title")
-            st.caption("Bu PDF'teki ders sütunlarını PDF'te SOLDAN SAĞA hangi sırayla göründüğüyle AYNI sırada girin.")
-            subj_text = st.text_area(
-                "Dersler ve soru sayıları (bir satıra bir ders: Ders Adı,Soru Sayısı)",
-                value=f"{default_subject or 'Ders'},10",
-                height=100,
-                key="gen_subjects",
-            )
-            try:
-                subject_rows = []
-                for line in subj_text.strip().splitlines():
-                    name, cnt = line.split(",")
-                    subject_rows.append((name.strip(), int(cnt.strip())))
-            except Exception:
-                subject_rows = []
-                st.error("Ders listesi formatı hatalı. Her satır 'Ders Adı,Soru Sayısı' şeklinde olmalı.")
 
-            auto_try = st.checkbox("Cevap anahtarını PDF'in son sayfasından otomatik okumayı dene", value=bool(uploaded))
+            if _kesif:
+                subject_rows = [(d, len(v)) for d, v in _kesif["cevaplar"].items()]
+                st.caption("Dersler ve soru sayıları PDF'ten okundu; elle girmenize gerek yok.")
+            else:
+                st.caption(
+                    "Bu PDF'teki ders sütunlarını, PDF'te SOLDAN SAĞA hangi sırayla "
+                    "göründüğüyle AYNI sırada girin."
+                )
+                subj_text = st.text_area(
+                    "Dersler ve soru sayıları (bir satıra bir ders: Ders Adı,Soru Sayısı)",
+                    value=f"{default_subject or 'Ders'},10",
+                    height=100,
+                    key="gen_subjects",
+                )
+                try:
+                    subject_rows = []
+                    for line in subj_text.strip().splitlines():
+                        name, cnt = line.split(",")
+                        subject_rows.append((name.strip(), int(cnt.strip())))
+                except Exception:
+                    subject_rows = []
+                    st.error("Ders listesi formatı hatalı. Her satır 'Ders Adı,Soru Sayısı' şeklinde olmalı.")
 
             parsed_key = None
-            if uploaded and auto_try and subject_rows:
+            _kes_sayfa = None
+            if _kesif:
+                parsed_key = {"Genel": _kesif["cevaplar"]}
+                _kes_sayfa = None if _kesif["ayri"] else _kesif["sayfa"]
+            elif uploaded and subject_rows and st.checkbox(
+                    "Cevap anahtarını PDF'in son sayfasından okumayı dene", value=True,
+                    key="gen_autotry"):
                 key, msg, idx = parsing.extract_answer_key(uploaded, subject_rows)
                 if key:
                     st.success("Cevap anahtarı otomatik okundu ✅")
                     parsed_key = {"Genel": key}
-                    st.session_state["_gen_key_idx"] = idx
+                    _kes_sayfa = idx
                 else:
                     st.warning(f"Otomatik okunamadı: {msg} Aşağıdan elle girebilirsiniz.")
 
             manual_answers = {}
             if parsed_key is None and subject_rows:
-                st.markdown("**Cevap anahtarını elle girin** (virgülle ayrılmış, örn: A,B,C,D,...)")
+                st.markdown("**Cevap anahtarını elle girin**")
+                st.caption("Harfleri sırayla yazın; virgül, boşluk veya bitişik — hepsi olur.")
                 for name, cnt in subject_rows:
                     txt = st.text_input(f"{name} cevapları ({cnt} adet)", key=f"gen_manual_{name}")
-                    manual_answers[name] = [x.strip().upper() for x in txt.split(",") if x.strip()]
+                    _h = [c for c in (txt or "").upper() if c in "ABCDE"]
+                    manual_answers[name] = _h
+                    if _h:
+                        st.caption(("✅ " if len(_h) == cnt else "⚠️ ")
+                                   + f"{len(_h)} cevap okundu ({cnt} olmalı).")
 
             if st.button("Testi Kaydet", type="primary"):
                 if not (title and subject_rows):
@@ -2816,25 +2922,32 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     else:
                         valid = all(len(manual_answers.get(n, [])) == c for n, c in subject_rows)
                         if not valid:
-                            st.error("Elle girilen cevap sayıları soru sayılarıyla eşleşmiyor.")
+                            st.error("Girilen cevap sayıları soru sayılarıyla eşleşmiyor.")
                             st.stop()
                         final_key = {"Genel": manual_answers}
 
                     safe_title = slugify(title, "test")
                     orig_path = None
                     if uploaded:
-                        idx = st.session_state.get("_gen_key_idx")
                         safe_path = os.path.join(PDF_DIR, f"{safe_title}_guvenli.pdf")
-                        with st.spinner("PDF hazırlanıyor ve küçültülüyor, bu birkaç saniye sürebilir..."):
-                            parsing.crop_and_merge([(uploaded, idx if idx is not None else parsing.pdf_page_count(uploaded) - 1)], safe_path)
-                            orig_path = os.path.join(PRIVATE_DIR,f"{safe_title}_orijinal.pdf")
+                        with st.spinner("PDF hazırlanıyor ve küçültülüyor..."):
+                            # Anahtar AYRI dosyadaysa kitapçıktan sayfa kırpılmaz.
+                            _kes = _kes_sayfa if _kes_sayfa is not None \
+                                else parsing.pdf_page_count(uploaded)
+                            parsing.crop_and_merge([(uploaded, _kes)], safe_path)
+                            orig_path = os.path.join(PRIVATE_DIR, f"{safe_title}_orijinal.pdf")
                             parsing.merge_full([uploaded], orig_path)
                     else:
-                        safe_path = ""  # PDF yok, sadece cevap anahtarı / metin bazlı çalışılabilir
+                        safe_path = ""
                     _eid, _uy = _deneme_ekle(title, gcat, safe_path, structure, final_key,
                                              source="manuel", pdf_path_original=orig_path)
-                    note = _compression_note(safe_path) if safe_path else ""
-                    st.session_state["_admin_flash"] = ("success", f"'{title}' {gcat} kategorisine eklendi." + note)
+                    _msj = [("success", f"✅ '{title}' → **{gcat}** kategorisine eklendi "
+                                        f"({sum(c for _n, c in subject_rows)} soru).")]
+                    if _uy:
+                        _msj.append(("error", _uy))
+                    st.session_state["_admin_flash"] = _msj
+                    st.session_state["_islem_balon"] = True
+                    st.session_state.pop("_man_kesif", None)
                     st.rerun()
 
         # ---------------- Bursluluk (İOKBS) otomatik indirme ----------------

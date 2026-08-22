@@ -32,7 +32,7 @@ import re
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-22.2"
+SURUM = "2026-08-22.3"
 
 DERS_ADLARI = [
     "Türkçe",
