@@ -59,7 +59,7 @@ os.makedirs(PRIVATE_DIR, exist_ok=True)
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-22.4"
+SURUM = "2026-08-22.5"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -951,6 +951,13 @@ def _deneme_ekle(baslik, kategori, guvenli_yol, yapi, anahtar, source="manuel",
     )
     if not guvenli_yol or not os.path.exists(guvenli_yol):
         return exam_id, None
+    # FİLİGRAN: ÖSYM/MEB kitapçıklarının üstündeki büyük gri damga
+    # yazıların okunmasını zorlaştırıyor. Damga PDF'in içinde ayrı bir
+    # katman olarak durduğu için tamamen ve kayıpsız çıkarılabiliyor.
+    try:
+        parsing.filigrani_kaldir(guvenli_yol)
+    except Exception:
+        pass
     try:
         if os.path.getsize(guvenli_yol) > db.PDF_SAKLAMA_SINIRI:
             parsing.gorsel_kucult(guvenli_yol, sinir=db.PDF_SAKLAMA_SINIRI)
@@ -1383,22 +1390,27 @@ def inject_css():
         div[role="radiogroup"] > label {
             padding: 2px 8px; border-radius: 8px;
         }
-        /* ÖNEMLİ - TELEFONDA "GÖRÜNÜM" DÜĞMELERİ ÇALIŞMIYORDU:
-           Seçenek yazısı ile yuvarlak kutucuk çok küçüktü; parmakla
-           basıldığında dokunma iki öğenin arasına düşüyor ve hiçbir şey
-           olmuyordu. Dar ekranda seçenekler artık tam genişlikte, yüksek
-           ve birbirinden ayrık kutular hâline geliyor. */
+        /* ÖNEMLİ - TELEFONDA DOKUNMA SORUNU:
+           Yuvarlak seçenek kutucukları parmak için çok küçüktü. Dar
+           ekranda seçenekler yükseltilip çerçeveleniyor. DİKKAT: burada
+           "width: 100%" YOK -- eskiden vardı ve optik formdaki A/B/C/D/E
+           şıklarını da alt alta tek sütuna diziyordu; 120 soruluk bir
+           sınavda form uçsuz bucaksız uzuyordu. */
         @media (max-width: 900px) {
             div[data-testid="stRadio"] div[role="radiogroup"] {
                 gap: 8px !important;
             }
             div[data-testid="stRadio"] div[role="radiogroup"] > label {
-                min-height: 46px; display: flex !important; align-items: center;
-                padding: 8px 12px !important; border: 1px solid #CBD5E1;
-                border-radius: 12px; background: #F8FAFC; width: 100%;
+                min-height: 44px; display: flex !important; align-items: center;
+                padding: 6px 10px !important; border: 1px solid #CBD5E1;
+                border-radius: 12px; background: #F8FAFC; min-width: 56px;
             }
             div[data-testid="stRadio"] div[role="radiogroup"] > label * {
                 pointer-events: none;   /* dokunma her zaman etikete gitsin */
+            }
+            /* Görünüm düğmeleri parmakla rahat basılsın */
+            .st-key-lgs_gorunum .stButton>button {
+                min-height: 48px; font-size: 1rem;
             }
         }
         </style>
@@ -1414,12 +1426,24 @@ def build_generic_structure(subject_rows):
 
 # ---------------------------------------------------------------- app shell
 
-# initial_sidebar_state="expanded": tablette/telefonda sayfa her acildiginda
-# giris menusu ACIK gelsin (kullanici menuyu bulamayip giris yapamaz duruma
-# dusmesin).
+# ÖNEMLİ - TELEFONDA HİÇBİR DÜĞME ÇALIŞMIYOR GİBİ GÖRÜNÜYORDU:
+# Kenar menüsü telefonda sayfanın ÜSTÜNE açılan bir çekmecedir ve ekranın
+# yaklaşık dörtte üçünü kaplar. Menü açık kaldığı sürece arkadaki hiçbir
+# şeye dokunulamaz -- dokunuş menüye gider. Program menüyü "her zaman
+# açık" başlatıyordu; ölçüldü: 390 piksel genişliğinde bir telefonda
+# "Yan yana / Alt alta" düğmeleri menünün altında kalıyor ve basıldığında
+# hiçbir şey olmuyordu. Kullanıcının "telefonda çalışmadı" dediği sorun
+# buydu.
+# Çözüm: menü SADECE henüz giriş yapılmamışken açık gelir (giriş kutusu
+# görünsün diye); giriş yapılır yapılmaz kapanır ve ekran tamamen
+# öğrenciye kalır.
 st.set_page_config(
     page_title=config.APP_TITLE, layout="wide", page_icon="📚",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state=(
+        "collapsed"
+        if (st.session_state.get("student_name") or st.session_state.get("is_admin"))
+        else "expanded"
+    ),
 )
 inject_css()
 
@@ -2026,15 +2050,31 @@ if aktif_bolum == SEK_SINAV:
         # Tablet yatayken yan yana rahat okunur; dikeyken veya telefonda alt
         # alta daha iyi. Cihaza göre otomatik ayarlanıyor ama öğrenci
         # istediğinde elle de değiştirebilsin diye buraya bir düğme konuldu.
-        _gorunum = st.radio(
-            "Görünüm",
-            ["🖥️ Yan yana", "📱 Alt alta"],
-            horizontal=True,
-            key="_gorunum_secimi",
-            help="Tablet yatayken 'Yan yana', dikeyken 'Alt alta' daha rahat olur.",
-            label_visibility="collapsed",
-        )
-        if _gorunum.endswith("Alt alta"):
+        # ÖNEMLİ - TELEFONDA ÇALIŞMIYORDU: Bu seçim önce "radio"
+        # (yuvarlak seçenek) idi. Bilgisayarda fareyle sorunsuz
+        # çalışıyordu ama telefonda parmakla basıldığında hiçbir şey
+        # olmuyordu; kutucuğun kendisi çok küçük, dokunma ise etiketin
+        # boşluğuna düşüyordu. CSS ile büyütmek de yetmedi. Artık
+        # düğme kullanılıyor: düğmenin TAMAMI basılabilir alandır,
+        # dokunmatik ekranlarda en güvenilir yol budur.
+        if "_gorunum_alt" not in st.session_state:
+            st.session_state["_gorunum_alt"] = False
+        with st.container(key="lgs_gorunum"):
+            _g1, _g2, _g3 = st.columns([1, 1, 3])
+            if _g1.button(
+                    ("✅ " if not st.session_state["_gorunum_alt"] else "") + "🖥️ Yan yana",
+                    key="_gorunum_yan", use_container_width=True,
+                    type="primary" if not st.session_state["_gorunum_alt"] else "secondary"):
+                st.session_state["_gorunum_alt"] = False
+                _yenile(sadece_bolum=False)
+            if _g2.button(
+                    ("✅ " if st.session_state["_gorunum_alt"] else "") + "📱 Alt alta",
+                    key="_gorunum_altbtn", use_container_width=True,
+                    type="primary" if st.session_state["_gorunum_alt"] else "secondary"):
+                st.session_state["_gorunum_alt"] = True
+                _yenile(sadece_bolum=False)
+            _g3.caption("Tablet yatayken **Yan yana**, telefonda **Alt alta** daha rahat okunur.")
+        if st.session_state["_gorunum_alt"]:
             col_pdf = st.container()
             col_form = st.container()
         else:
@@ -2448,7 +2488,9 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
             _simdiki_dosya = f"{qb_file.name}|{qb_file.size}" if qb_file is not None else None
             if st.session_state.get("_qb_dosya") != _simdiki_dosya:
                 st.session_state["_qb_dosya"] = _simdiki_dosya
-                for _k in ("_qb_testler", "_qb_uyarilar", "_qb_path", "qb_secim"):
+                for _k in [k for k in list(st.session_state)
+                           if k in ("_qb_testler", "_qb_uyarilar", "_qb_path")
+                           or str(k).startswith("qb_secim")]:
                     st.session_state.pop(_k, None)
             if qb_file is None:
                 st.info("⬆️ Önce yukarıdan bir PDF seçin; ardından tarama düğmesi çıkacak.")
@@ -2586,13 +2628,6 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         _ad = t["konu"] if t.get("tur") == "unite" else f"Test {t['test_no']} · {t['konu']}"
                         return f"{_ad} ({_ek})"
 
-                    _secilenler = st.multiselect(
-                        "Eklenecek testler",
-                        _bu_ders,
-                        default=_bu_ders,
-                        format_func=_qb_etiket,
-                        key="qb_secim",
-                    )
                     _unite_mi = any(t.get("tur") == "unite" for t in _bu_ders)
                     _varsayilan_kat = (
                         f"Ünite Testleri - {_secili_ders}" if _unite_mi
@@ -2602,9 +2637,38 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         "Hangi bölüme eklensin?", value=_varsayilan_kat, key="qb_kategori",
                         help="Öğrenci 'Sınav Çöz' ekranında bu adı görecek.",
                     )
+                    # KULLANICI GERİ BİLDİRİMİ ("ekledim ama veriler ekranda
+                    # aynen duruyor, eklendi mi anlamadım"): Eklenen testler
+                    # artık listeden DÜŞÜYOR. Böylece ekranda sadece HENÜZ
+                    # EKLENMEMİŞ testler kalıyor; iş bitince liste boşalıyor
+                    # ve yeşil "hepsi ekli" yazısı çıkıyor.
+                    _hedef_kat = (_kategori_adi or _varsayilan_kat).strip()
+                    _mevcut = {
+                        (x["title"], x["category"]) for x in db.get_exams()
+                    }
+                    _zaten = [t for t in _bu_ders if (_qb_basligi(t), _hedef_kat) in _mevcut]
+                    _kalan = [t for t in _bu_ders if (_qb_basligi(t), _hedef_kat) not in _mevcut]
+                    if _zaten:
+                        st.success(
+                            f"✅ Bu dersin **{len(_zaten)} testi** zaten "
+                            f"**{_hedef_kat}** bölümüne eklenmiş; listede gösterilmiyor."
+                        )
+                    if not _kalan:
+                        st.info(
+                            f"**{_secili_ders}** dersinin eklenebilir bütün testleri "
+                            f"eklendi. Yukarıdaki **Ders** kutusundan başka bir derse "
+                            f"geçebilir ya da yeni bir kitap yükleyebilirsiniz."
+                        )
+                    _secilenler = st.multiselect(
+                        "Eklenecek testler",
+                        _kalan,
+                        default=_kalan,
+                        format_func=_qb_etiket,
+                        key=f"qb_secim_{_secili_ders}_{len(_kalan)}",
+                    )
                     st.caption(
                         f"{len(_secilenler)} test seçili. Her biri ayrı bir deneme olarak "
-                        f"**{_kategori_adi or _varsayilan_kat}** bölümüne eklenir."
+                        f"**{_hedef_kat}** bölümüne eklenir."
                     )
                     if st.button("✅ Seçilen Testleri Ekle", type="primary", disabled=not _secilenler):
                         _kategori = (_kategori_adi or _varsayilan_kat).strip()
@@ -3674,6 +3738,36 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     if st.button("🔑 Cevap anahtarı", key=f"keybtn_{e['id']}",
                                  use_container_width=True):
                         st.session_state["_anahtar_goster"] = e["id"]
+                        st.rerun()
+                    # Daha önce eklenmiş kitapçıklarda filigran duruyor
+                    # olabilir; silip yeniden eklemeye gerek kalmasın diye
+                    # tek düğmeyle temizlenebiliyor (sonuçlar korunur).
+                    if st.button("🧼 Filigranı temizle", key=f"filbtn_{e['id']}",
+                                 use_container_width=True,
+                                 help="Kitapçığın üstündeki büyük gri ÖSYM/MEB damgasını "
+                                      "kalıcı olarak siler; yazılar netleşir."):
+                        _yol, _hata = _pdf_yolu_onbellekli(
+                            e["id"], e.get("pdf_path"), e.get("source_url"))
+                        if not _yol:
+                            st.session_state["_admin_flash"] = [
+                                ("error", f"❌ {e['title']}: kitapçık dosyası bulunamadı.")]
+                        else:
+                            try:
+                                _n = parsing.filigrani_kaldir(_yol)
+                            except Exception as _ex:
+                                _n, _hata = 0, str(_ex)
+                            if _n:
+                                with open(_yol, "rb") as _f:
+                                    db.pdf_kaydet(e["id"], os.path.basename(_yol), _f.read())
+                                _pdf_yolu_onbellekli.clear()
+                                _pdf_page_image.clear()
+                                st.session_state["_admin_flash"] = [
+                                    ("success", f"🧼 **{e['title']}**: {_n} sayfadaki "
+                                                f"filigran silindi.")]
+                            else:
+                                st.session_state["_admin_flash"] = [
+                                    ("error", f"ℹ️ **{e['title']}**: silinebilecek bir "
+                                              f"filigran katmanı bulunamadı.")]
                         st.rerun()
                     if e.get("pdf_path_original") and os.path.exists(e["pdf_path_original"]):
                         show_key = f"show_orig_{e['id']}"

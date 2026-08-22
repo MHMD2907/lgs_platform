@@ -13,3 +13,4 @@ Pillow>=10.0         # PDF'leri küçültmek (öğrenciye gösterilen kitapçı�
 google-api-python-client>=2.100
 google-auth-httplib2>=0.2
 google-auth-oauthlib>=1.2
+pikepdf>=8.0         # PDF'lerdeki ÖSYM/MEB filigranını (damga katmanını) kayıpsız silmek için

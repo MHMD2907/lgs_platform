@@ -23,7 +23,7 @@ import tempfile
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-22.4"
+SURUM = "2026-08-22.5"
 from PyPDF2 import PdfReader, PdfWriter
 
 try:
@@ -306,6 +306,115 @@ def pdf_page_count(file_obj_or_path):
     if hasattr(file_obj_or_path, "seek"):
         file_obj_or_path.seek(0)
     return len(PdfReader(file_obj_or_path).pages)
+
+
+def _filigran_formu_mu(nesne, sayfa_alani, derinlik=0):
+    """Bu Form XObject bir FİLİGRAN (damga) katmanı mı?
+
+    İki şartı birden arıyoruz:
+      1. Sayfanın neredeyse tamamını kaplıyor,
+      2. İçinde "isteğe bağlı içerik" (/OC) katmanı var -- filigranlar
+         PDF'e böyle, açılıp kapanabilir bir katman olarak basılır.
+    Gerçek soru/şekil çizimleri bu iki şartı aynı anda sağlamaz."""
+    try:
+        from pikepdf import Name
+        if nesne.get("/Subtype") != Name("/Form"):
+            return False
+        bb = [float(x) for x in nesne.get("/BBox", [0, 0, 0, 0])]
+        alan = abs((bb[2] - bb[0]) * (bb[3] - bb[1]))
+        if not sayfa_alani or alan / sayfa_alani < 0.7:
+            return False
+    except Exception:
+        return False
+    return _oc_katmani_var(nesne)
+
+
+def _oc_katmani_var(nesne, derinlik=0):
+    if derinlik > 4:
+        return False
+    try:
+        if "/OC" in nesne:
+            return True
+        kaynak = nesne.get("/Resources")
+        if kaynak is None or "/XObject" not in kaynak:
+            return False
+        for _ad, alt in kaynak["/XObject"].items():
+            if _oc_katmani_var(alt, derinlik + 1):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def filigrani_kaldir(yol, cikis=None):
+    """PDF sayfalarındaki FİLİGRANI (ÖSYM/MEB damgası) siler.
+
+    NEDEN RESİM İŞLEME DEĞİL: Filigranı renginden tanıyıp beyazlatmak
+    denendi ve ÖLÇÜLDÜ -- işe yaramıyor, çünkü kitapçığın kendi yazısı da
+    aynı griliğe düşüyor ve metin de siliniyordu. Doğrusu, filigranı
+    PDF'in İÇİNDEN çıkarmak: ÖSYM kitapçıklarında filigran, sayfanın
+    üstüne ayrı bir katman (Form XObject + /OC) olarak basılıyor. O
+    katmanı çağıran komut içerikten atılınca filigran hiç çizilmiyor;
+    yazıya, şekle, renge dokunulmuyor.
+
+    Ölçüldü (2020 KPSS Önlisans, 33 sayfa): filigran tamamen kalktı,
+    metin bozulmadı, dosya 3,4 MB'tan 1,8 MB'a düştü.
+
+    Döner: silinen filigran sayısı (0 ise dosyaya dokunulmamıştır)."""
+    try:
+        import pikepdf
+    except Exception:
+        return 0
+    try:
+        pdf = pikepdf.open(yol)
+    except Exception:
+        return 0
+    silinen = 0
+    try:
+        for sayfa in pdf.pages:
+            kaynak = sayfa.get("/Resources")
+            if not kaynak or "/XObject" not in kaynak:
+                continue
+            try:
+                kutu = [float(x) for x in sayfa.MediaBox]
+                sayfa_alani = abs((kutu[2] - kutu[0]) * (kutu[3] - kutu[1]))
+            except Exception:
+                continue
+            hedefler = [
+                ad for ad, ob in kaynak["/XObject"].items()
+                if _filigran_formu_mu(ob, sayfa_alani)
+            ]
+            if not hedefler:
+                continue
+            try:
+                kalanlar = []
+                for islem in pikepdf.parse_content_stream(sayfa):
+                    if (str(islem.operator) == "Do" and islem.operands
+                            and str(islem.operands[0]) in hedefler):
+                        silinen += 1
+                        continue
+                    kalanlar.append(islem)
+                sayfa.Contents = pdf.make_stream(
+                    pikepdf.unparse_content_stream(kalanlar))
+                for ad in hedefler:
+                    del kaynak["/XObject"][ad]
+            except Exception:
+                continue
+        if silinen:
+            pdf.save(cikis or (yol + ".tmp"))
+    except Exception:
+        return 0
+    finally:
+        try:
+            pdf.close()
+        except Exception:
+            pass
+    if silinen and not cikis:
+        try:
+            os.replace(yol + ".tmp", yol)
+        except Exception:
+            return 0
+    return silinen
 
 
 def gorsel_kucult(yol, dpi=110, kalite=58, sinir=None):
@@ -796,6 +905,21 @@ def _ders_bloklari(ikililer):
     return temiz
 
 
+def _tekrari_at(metin):
+    """Aynı ifade iki kez arka arkaya yazıldıysa bir kez bırakır.
+
+    ÖLÇÜLDÜ (2020 KPSS Önlisans): Cevap anahtarı sütununun üstünde
+    "GENEL YETENEK" yazısı iki satır hâlinde tekrar ediyor; iki satır
+    birleştirilince ders adı "Genel Yetenek Genel Yetenek" oluyor ve
+    optik formda soru başlıkları böyle görünüyordu."""
+    kelimeler = (metin or "").split()
+    n = len(kelimeler)
+    for uzunluk in range(n // 2, 0, -1):
+        if kelimeler[:uzunluk] == kelimeler[uzunluk:uzunluk * 2] and n == uzunluk * 2:
+            return " ".join(kelimeler[:uzunluk])
+    return metin
+
+
 def _blok_basligi(page, blok, kullanilan):
     """Bir cevap bloğunun ÜSTÜNDEKİ başlık yazısını okur.
 
@@ -823,12 +947,13 @@ def _blok_basligi(page, blok, kullanilan):
         parcalar.append(" ".join(w["text"] for w in sorted(kelimeler, key=lambda z: z["x0"])))
     ham = " ".join(parcalar).strip(" :.-")
     ham = re.sub(r"\s+", " ", ham)
+    ham = _tekrari_at(ham)
     bilinen = _ders_tani_kesin(ham) or _ders_tani(ham)
     if bilinen:
         return bilinen
     # Tek satır da dene (iki satır birleşince anlamsızlaşmış olabilir)
     if parcalar:
-        son = parcalar[-1].strip(" :.-")
+        son = _tekrari_at(re.sub(r"\s+", " ", parcalar[-1]).strip(" :.-"))
         bilinen = _ders_tani_kesin(son) or _ders_tani(son)
         if bilinen:
             return bilinen
