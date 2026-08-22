@@ -21,6 +21,9 @@ from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lgs_platform.db")
 
+# Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
+SURUM = "2026-08-22.1"
+
 DEFAULT_CATEGORIES = [
     "8. Sınıf (LGS)",
     "7. Sınıf",

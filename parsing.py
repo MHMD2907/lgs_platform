@@ -21,6 +21,9 @@ import subprocess
 import tempfile
 
 import pdfplumber
+
+# Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
+SURUM = "2026-08-22.1"
 from PyPDF2 import PdfReader, PdfWriter
 
 try:

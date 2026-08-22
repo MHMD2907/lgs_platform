@@ -31,6 +31,9 @@ import re
 
 import pdfplumber
 
+# Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
+SURUM = "2026-08-22.1"
+
 DERS_ADLARI = [
     "Türkçe",
     "Matematik",
@@ -38,6 +41,7 @@ DERS_ADLARI = [
     "T.C. İnkılap Tarihi ve Atatürkçülük",
     "Din Kültürü ve Ahlak Bilgisi",
     "İngilizce",
+    "Sosyal Bilgiler",
 ]
 
 # Cevap anahtarindaki BUYUK HARFLI ders basliklari -> normal ders adi
@@ -583,19 +587,66 @@ def _okunuslar(metin):
     return (_meb_duzelt(metin), _kaydirmayi_coz(metin), _baslik_onar(metin))
 
 
+# ÖNEMLİ - ÇOK DERSLİ KİTAPLARDAKİ HATA:
+# Kitaplar ders adını her yerde TAM yazmıyor. Cevap anahtarı sayfasının
+# başlığında "T.C. İNKILAP TARİHİ VE ATATÜRKÇÜLÜK" yerine sadece
+# "İNKILAP TARİHİ", "DİN KÜLTÜRÜ VE AHLAK BİLGİSİ" yerine "DİN KÜLTÜRÜ"
+# yazabiliyor. Eski kod tam adı aradığı için bu dersleri TANIYAMIYOR,
+# hepsini kitabın kapağındaki derse (Türkçe) yazıyordu. Sonuçta İnkılap'ın
+# "1. Ünite"si, Türkçe'nin "1. Ünite"siyle aynı ada sahip oluyor ve
+# "zaten var" denip atlanıyordu -- kullanıcının "Din, İngilizce, İnkılap
+# hiç çıkmıyor" dediği durum tam olarak buydu.
+# Çözüm: her ders için kısa yazımların listesi.
+DERS_TAKMA_ADLARI = {
+    "Türkçe": ["Türkçe"],
+    "Matematik": ["Matematik"],
+    "Fen Bilimleri": ["Fen Bilimleri", "Fen ve Teknoloji", "Fen Bilgisi"],
+    "T.C. İnkılap Tarihi ve Atatürkçülük": [
+        "T.C. İnkılap Tarihi ve Atatürkçülük", "İnkılap Tarihi ve Atatürkçülük",
+        "TC İnkılap Tarihi", "İnkılap Tarihi", "İnkılâp Tarihi", "İnkılap", "İnkılâp",
+    ],
+    "Din Kültürü ve Ahlak Bilgisi": [
+        "Din Kültürü ve Ahlak Bilgisi", "Din Kültürü ve Ahlâk Bilgisi",
+        "Din Kültürü", "Din Kültürü ve Ahlak",
+    ],
+    "İngilizce": ["İngilizce", "Yabancı Dil (İngilizce)", "Yabancı Dil"],
+    "Sosyal Bilgiler": ["Sosyal Bilgiler"],
+}
+
+# Uzun yazımlar önce denensin ki "İnkılap Tarihi" varken "İnkılap" ile
+# yetinilmesin.
+_DERS_ARAMA = sorted(
+    ((takma, ders) for ders, takmalar in DERS_TAKMA_ADLARI.items() for takma in takmalar),
+    key=lambda x: len(x[0]), reverse=True,
+)
+
+
 def _ders_bul_kesin(metin):
     """Metinde ders adını KESİN olarak (harf harf, bitişik) arar.
 
     ÖNEMLİ: Burada eskiden 'harfler sırayla geçiyor mu' testi kullanılıyordu.
-    O test ders AYRAÇ sayfaları için yazılmıştı (kenardaki 'IQ YAYINLARI'
-    süsü harflerin arasına karışıyordu). Ama bir cevap anahtarı sayfasının
-    400 karakterinde 'T-ü-r-k-ç-e' harfleri tesadüfen sırayla bulunabiliyor:
-    ölçüldü, Matematik kitabı 'Türkçe' sanıldı. Artık bitişik aranıyor."""
-    for okunus in _okunuslar(metin):
+    O test ders AYRAÇ sayfaları için yazılmıştı. Ama bir cevap anahtarı
+    sayfasının 400 karakterinde 'T-ü-r-k-ç-e' harfleri tesadüfen sırayla
+    bulunabiliyor: ölçüldü, Matematik kitabı 'Türkçe' sanıldı. Artık
+    bitişik aranıyor ve kısa yazımlar da tanınıyor."""
+    okunuslar = _okunuslar(metin)
+    for okunus in okunuslar:
         hedef = _sadece_harfler(okunus)
-        for d in sorted(DERS_ADLARI, key=len, reverse=True):
-            if _sadece_harfler(d) in hedef:
-                return d
+        for takma, ders in _DERS_ARAMA:
+            if _sadece_harfler(takma) in hedef:
+                return ders
+    # İKİNCİ DENEME - BOZUK "İ" HARFİ: Bu PDF'lerde en sık bozulan karakter
+    # Türkçe'nin noktalı/noktasız i'sidir; bazen hiç çıkmaz
+    # ("T.C. İNKILAP TARİHİ" -> "T.C. NKILAP TARH"). Bu yüzden ikinci turda
+    # i/ı/İ/I harfleri İKİ TARAFTAN DA atılıp karşılaştırılıyor.
+    def _isiz(x):
+        return re.sub(r"[Iİıi]", "", _sadece_harfler(x))
+    for okunus in okunuslar:
+        hedef = _isiz(okunus)
+        for takma, ders in _DERS_ARAMA:
+            t = _isiz(takma)
+            if len(t) >= 5 and t in hedef:
+                return ders
     return None
 
 
@@ -636,6 +687,12 @@ def _ad_temizle(ad):
         return None       # kelimeler birbirine yapışmış
     if sum(1 for c in ad if c.isalpha()) < len(ad) * 0.6:
         return None
+    # "1. C 2. A 3. B" gibi cevap dizilerini ad sanma
+    if len(re.findall(r"\d{1,3}\s*[\.\)]\s*[A-E]\b", ad)) >= 2:
+        return None
+    _kelimeler = [w for w in ad.split() if w]
+    if _kelimeler and sum(1 for w in _kelimeler if len(w) <= 2) > len(_kelimeler) * 0.6:
+        return None
     return ad
 
 
@@ -666,7 +723,13 @@ def _unite_adlari(doc, tarama=20):
     bir SONRAKİ satıra bakılıyor."""
     adlar = {}
     for i in range(min(tarama, len(doc))):
-        ham = _sayfa_metni(doc, i).splitlines()
+        _sayfa = _sayfa_metni(doc, i)
+        # ÖNEMLİ: Cevap anahtarı sayfası da "1. Ünite" başlığı taşır ve hemen
+        # altında cevaplar gelir. İçindekiler sanılırsa ünite adı
+        # "1. Ünite · 1. C 2. A 3. B" gibi saçma çıkıyordu. Bu sayfalar atlanır.
+        if "CEVAPANAHTARI" in _sadece_harfler(_sayfa):
+            continue
+        ham = _sayfa.splitlines()
         # Her satırı ayrı ayrı, en okunur hâline getir
         satirlar = []
         for satir in ham:
@@ -865,10 +928,28 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
         acik = None
         merkezi_basladi = False
 
+        kullanilan_dersler = []
+
         def _kapat(acik_kayit):
             if not acik_kayit or not acik_kayit["bloklar"]:
                 return
-            ders = acik_kayit["ders"] or kitap_dersi or "Genel"
+            ders = acik_kayit["ders"]
+            if not ders:
+                # ÖNEMLİ: Ders adı okunamadıysa kitabın kapağındaki derse
+                # yazmak TEHLİKELİ -- çok dersli kitaplarda bütün dersler
+                # aynı ada düşer, üniteler "zaten var" diye atlanır ve
+                # kullanıcı "Din, İngilizce hiç çıkmıyor" der. Bu yüzden
+                # tanınmayan bölüme AYRI bir ad veriliyor.
+                ders = kitap_dersi if not kullanilan_dersler else None
+                if not ders or ders in kullanilan_dersler:
+                    ders = f"Bölüm {len(kullanilan_dersler) + 1}"
+                    uyarilar.append(
+                        f"Bir bölümün ders adı okunamadı; '{ders}' olarak eklendi. "
+                        f"İsterseniz 'Kayıtlı Denemeler'den silip 'Diğer Kategori' "
+                        f"bölümünden doğru adla ekleyebilirsiniz."
+                    )
+            if ders not in kullanilan_dersler:
+                kullanilan_dersler.append(ders)
             bolumler = _bolumlere_ayir(acik_kayit["govde"])
             if not bolumler:
                 uyarilar.append(f"{ders}: cevap anahtarı bulundu ama soru sayfaları eşleşmedi.")

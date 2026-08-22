@@ -37,6 +37,9 @@ _BASLIKLAR = {
 }
 TIMEOUT = 20
 
+# Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
+SURUM = "2026-08-22.1"
+
 # Yil basina denenecek resmi EBA CDN kaliplari (yeni kaliplar buraya eklenebilir)
 EBA_URL_TEMPLATES = [
     "https://cdn.eba.gov.tr/yardimcikaynaklar/{yil}/06/trlgs/a_{yil}_{bolum}.pdf",
