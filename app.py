@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-25.1"
+SURUM = "2026-08-25.3"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -1811,12 +1811,24 @@ with st.sidebar:
         # Sadece öğrenci girişi yapılmış: kafa karışıklığını önlemek için
         # burada ayrıca "Yönetici Girişi" seçeneği GÖSTERİLMEZ. Yönetici
         # girişi yapmak isteyen kişi önce çıkış yapıp Yönetici'yi seçmelidir.
-        st.success(f"Hoş geldin, {st.session_state.student_display_name}! 👋")
+        # ÖNEMLİ - KAFA KARIŞIKLIĞI: Yönetici olarak giriş yapan kişiye
+        # "Hoş geldin EMİR MİRAÇ ONUR" yazıyordu; kullanıcı haklı olarak
+        # "ben admin girdim, niye çocuğun adı yazıyor?" diyordu. Artık
+        # ASIL KİMLİK ne ise o yazıyor; öğrenci adı, sonucun kimin adına
+        # kaydedileceğini belirten ikinci satırda duruyor.
         if st.session_state.is_admin:
-            # Yönetici, yukarıdaki "öğrenci olarak devam et" ile bu moda
-            # geçmiş olabilir; hâlâ yönetici olduğunu görebilmeli.
-            st.caption("⚙️ Aynı zamanda yönetici olarak giriş yaptınız.")
-        if st.button("Çıkış Yap", key="student_logout_btn", use_container_width=True):
+            st.success("⚙️ Yönetici olarak giriş yaptınız.")
+            st.info(
+                f"📝 Çözülen sınavlar **{st.session_state.student_display_name}** "
+                f"adına kaydedilecek.",
+                icon="👤",
+            )
+        else:
+            st.success(f"Hoş geldin, {st.session_state.student_display_name}! 👋")
+        if st.button(
+            "Öğrenci seçimini bırak" if st.session_state.is_admin else "Çıkış Yap",
+            key="student_logout_btn", use_container_width=True,
+        ):
             if st.session_state.is_admin:
                 # Yönetici "öğrenci olarak devam et" modundaydı: sadece o modu bırak.
                 st.session_state.student_name = ""
@@ -2829,14 +2841,36 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     pass
                 with open(_qb_path, "wb") as f:
                     shutil.copyfileobj(qb_file, f, 4 * 1024 * 1024)
-                with st.spinner("📖 Kitap taranıyor: üniteler, soru numaraları ve cevap "
-                                "anahtarı bulunuyor... (büyük kitaplarda 1-2 dakika sürebilir)"):
+                # ÖNEMLİ - "PROGRAM DONDU MU, ÇALIŞIYOR MU?": Büyük kitaplarda
+                # tarama dakikalarca sürüyor ve ekranda dönen bir çemberden
+                # başka hiçbir şey görünmüyordu. Artık kaçıncı sayfada
+                # olduğu yazıyor; hem beklerken içiniz rahat oluyor hem de
+                # bir sorun çıkarsa nerede çıktığı belli oluyor.
+                _tara_bar = st.progress(0.0, text="📖 Kitap açılıyor...")
+
+                def _tara_ilerleme(_s, _n):
                     try:
-                        _testler, _anahtar, _uyarilar = soru_bankasi.testleri_bul(
-                            _qb_path, parca_soru=_parca_secenek[_parca_ad]
+                        _tara_bar.progress(
+                            min(_s / max(_n, 1), 1.0),
+                            text=f"📖 Taranıyor: sayfa {_s} / {_n}",
                         )
-                    except Exception as e:
-                        _testler, _anahtar, _uyarilar = [], {}, [f"Kitap okunamadı: {e}"]
+                    except Exception:
+                        pass
+
+                try:
+                    _testler, _anahtar, _uyarilar = soru_bankasi.testleri_bul(
+                        _qb_path, parca_soru=_parca_secenek[_parca_ad],
+                        ilerleme=_tara_ilerleme,
+                    )
+                except MemoryError:
+                    _testler, _anahtar, _uyarilar = [], {}, [
+                        "Bellek yetmedi: bu kitap tek seferde taranamıyor. "
+                        "Kitabı bölüp (örneğin ders ders ayrı dosyalar hâlinde) "
+                        "yeniden deneyin."
+                    ]
+                except Exception as e:
+                    _testler, _anahtar, _uyarilar = [], {}, [f"Kitap okunamadı: {e}"]
+                _tara_bar.empty()
                 st.session_state[qb_path_state] = _qb_path
                 st.session_state["_qb_testler"] = _testler
                 st.session_state["_qb_uyarilar"] = _uyarilar
@@ -4273,12 +4307,20 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                                 # oturumu da yeni ada taşı, yoksa raporlar boş görünür.
                                 if st.session_state.student_name == _eski:
                                     st.session_state.student_name = _yeni_ad
-                                st.session_state["_admin_flash"] = (
-                                    "success",
-                                    f"✅ Kullanıcı adı güncellendi: **{_eski} → {_yeni_ad}** "
-                                    f"({s['display_name']}). Geçmiş sonuçları ve yarım "
-                                    f"kalan sınavı da yeni ada taşındı.",
-                                )
+                                if _yeni_ad == _eski:
+                                    st.session_state["_admin_flash"] = (
+                                        "success",
+                                        f"ℹ️ Kullanıcı adı zaten **{_eski}** idi; "
+                                        f"değişiklik yapılmadı.",
+                                    )
+                                else:
+                                    st.session_state["_admin_flash"] = (
+                                        "success",
+                                        f"✅ Kullanıcı adı güncellendi: **{_eski} → "
+                                        f"{_yeni_ad}** ({s['display_name']}). Geçmiş "
+                                        f"sonuçları ve yarım kalan sınavı da yeni ada "
+                                        f"taşındı.",
+                                    )
                                 st.rerun()
                             else:
                                 st.error(msg)

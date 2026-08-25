@@ -23,7 +23,7 @@ import tempfile
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-25.1"
+SURUM = "2026-08-25.3"
 from PyPDF2 import PdfReader, PdfWriter
 
 try:
@@ -109,9 +109,16 @@ def drop_blank_pages(path):
         total = len(doc)
         blank_idx = set()
         for i in range(total):
-            gray = doc[i].render(scale=20 / 72).to_pil().convert("L")
-            if gray.getextrema()[0] >= 250:
-                blank_idx.add(i)
+            _sayfa = doc[i]
+            try:
+                gray = _sayfa.render(scale=20 / 72).to_pil().convert("L")
+                if gray.getextrema()[0] >= 250:
+                    blank_idx.add(i)
+            finally:
+                try:
+                    _sayfa.close()
+                except Exception:
+                    pass
         doc.close()
         # Tüm sayfalar boşsa (beklenmez) dosyayı boşaltmayalım.
         if not blank_idx or len(blank_idx) >= total:
@@ -610,11 +617,16 @@ def cevap_anahtari_bul(pdf_yolu, subjects, tara=14):
         try:
             n = len(doc)
             for i in range(max(0, n - tara), n):
-                tp = doc[i].get_textpage()
+                _sayfa = doc[i]
+                tp = _sayfa.get_textpage()
                 try:
-                    metin = (tp.get_text_range() or "").upper()
+                    metin = (tp.get_text_bounded() or "").upper()
                 finally:
                     tp.close()
+                    try:
+                        _sayfa.close()   # buyuk kitaplarda bellek birikmesin
+                    except Exception:
+                        pass
                 sade = re.sub(r"[^A-Z]", "", metin.replace("İ", "I").replace("Ç", "C")
                               .replace("Ş", "S").replace("Ğ", "G").replace("Ü", "U")
                               .replace("Ö", "O"))
@@ -1013,11 +1025,16 @@ def _anahtar_sayfa_adaylari(pdf_yolu, tara=14):
             n = len(doc)
             adaylar = []
             for i in range(max(0, n - tara), n):
-                tp = doc[i].get_textpage()
+                _sayfa = doc[i]
+                tp = _sayfa.get_textpage()
                 try:
-                    metin = (tp.get_text_range() or "").upper()
+                    metin = (tp.get_text_bounded() or "").upper()
                 finally:
                     tp.close()
+                    try:
+                        _sayfa.close()   # buyuk kitaplarda bellek birikmesin
+                    except Exception:
+                        pass
                 if "CEVAPANAHTARI" in _kat(metin) or \
                         len(re.findall(r"\d{1,3}\s*[\.\)]\s*[A-E]\b", metin)) >= 15:
                     adaylar.append(i)

@@ -32,7 +32,7 @@ import re
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-25.1"
+SURUM = "2026-08-25.3"
 
 DERS_ADLARI = [
     "Türkçe",
@@ -168,13 +168,24 @@ def cevap_anahtarini_oku(pdf):
     Donus: {ders: {test_no: {soru_no: harf}}}"""
     key = {}
     aktif_ders = None
-    for idx in range(len(pdf.pages)):
+    _toplam = len(pdf.pages)
+    # ÖNEMLİ - PROGRAMIN ÇÖKMESİNİN SEBEBİ BURASIYDI ("Uygulama durdu."):
+    # Bu döngü eskiden ÖNCE `pdf.pages[idx]` diyip sayfayı açıyor, SONRA
+    # "bu sayfa son 8 sayfadan biri değilse atla" diyordu. Yani sadece 8
+    # sayfa okunacakken kitabın BÜTÜN sayfaları pdfplumber tarafından
+    # ayrıştırılıp bellekte tutuluyordu. 500-600 sayfalık 177 MB'lık bir
+    # çalışma kitabında bu birkaç gigabayt demek: bilgisayarda program
+    # hiçbir hata mesajı vermeden kapanıyor, bulutta sunucu yeniden
+    # başlıyordu. Artık gereksiz sayfa hiç açılmıyor.
+    for idx in range(max(0, _toplam - 8), _toplam):
         page = pdf.pages[idx]
-        # Sadece son sayfalardaki gercek anahtari al (basta "İÇİNDEKİLER"
-        # sayfasinda da bu kelime gecebiliyor).
-        if idx < len(pdf.pages) - 8:
-            continue
         satirlar = _satirlar(page)
+        # pdfplumber her sayfanın ayrıştırılmış hâlini bellekte tutar;
+        # işimiz bitince bırakıyoruz.
+        try:
+            page.flush_cache()
+        except Exception:
+            pass
         if not any("CEVAP ANAHTARI" in s.upper() for s in satirlar):
             continue
         for satir in satirlar:
@@ -220,21 +231,27 @@ def _iq_testlerini_bul(pdf_path):
         aktif_ders = None
         for i in range(len(doc)):
             page = doc[i]
-            test_no, konu = _serit_coz(_ust_serit(page))
+            try:
+                test_no, konu = _serit_coz(_ust_serit(page))
+            except Exception:
+                _sayfayi_birak(page)
+                continue
             if test_no is None:
                 # Test sayfasi degil -- ders ayraci olabilir. Ayrac sayfalari
                 # cok az metin icerir; tam metni okumak sadece bu sayfalar
                 # icin gerekiyor.
                 tp = page.get_textpage()
                 try:
-                    duz = re.sub(r"\s+", " ", tp.get_text_range() or "").strip()
+                    duz = re.sub(r"\s+", " ", tp.get_text_bounded() or "").strip()
                 finally:
                     tp.close()
+                    _sayfayi_birak(page)
                 if len(duz) < 140:
                     d = _ayrac_dersi(duz)
                     if d:
                         aktif_ders = d
                 continue
+            _sayfayi_birak(page)
             if aktif_ders is None:
                 continue
             # Ayni testin birden fazla sayfasi varsa (tam kitaplarda test
@@ -312,6 +329,7 @@ def gorunen_sorular(kaynak_pdf, sayfalar, anahtar_numaralari):
                     )
             finally:
                 tp.close()
+                _sayfayi_birak(page)
             for m in re.findall(r"(?<![\d,.])(\d{1,2})\.(?!\d)", metin):
                 n = int(m)
                 if 1 <= n <= 25:
@@ -438,11 +456,67 @@ def _duz(s):
 
 
 def _sayfa_metni(doc, i):
-    tp = doc[i].get_textpage()
+    page = doc[i]
+    tp = page.get_textpage()
     try:
-        return tp.get_text_range() or ""
+        # NOT: get_text_range() parametresiz çağrılınca pypdfium2 uyarı
+        # basıyor ("implicitly redirected to get_text_bounded"). Doğrudan
+        # get_text_bounded() çağırıyoruz; hem uyarı kalkıyor hem aynı iş.
+        return tp.get_text_bounded() or ""
     finally:
         tp.close()
+        _sayfayi_birak(page)
+
+
+def _sayfayi_birak(page):
+    """Açılan sayfayı hemen bırakır.
+
+    ÖNEMLİ - BÜYÜK KİTAPLARDA BELLEK: 500-600 sayfalık bir kitapta her
+    sayfa için birkaç kez sayfa nesnesi açılıyor. Bunlar Python'un çöp
+    toplayıcısını beklerse bellek hızla şişer ve program (özellikle
+    Windows'ta) hiçbir mesaj vermeden kapanır. Bu yüzden her sayfa iş
+    biter bitmez kapatılıyor."""
+    try:
+        page.close()
+    except Exception:
+        pass
+
+
+def _sayfa_okumalari(doc, i, sol=14, sag=54, ust_yukseklik=60):
+    """Bir sayfayı BİR KEZ açıp gereken bütün metinleri tek seferde okur.
+
+    ÖNEMLİ - HIZ VE BELLEK: Tarama sırasında her sayfa için AYRI AYRI üç
+    kez sayfa+metin nesnesi açılıyordu (tam metin, üst şerit, sol şerit).
+    Yani 600 sayfalık bir kitapta 1800 açılış. Tek açılışa indirildi.
+
+    Döner: (tam_metin, ust_serit, sol_serit)"""
+    page = doc[i]
+    tp = page.get_textpage()
+    try:
+        h, w = page.get_height(), page.get_width()
+        tam = tp.get_text_bounded() or ""
+        ust = tp.get_text_bounded(left=0, bottom=h - ust_yukseklik, right=w, top=h) or ""
+        sol_serit = tp.get_text_bounded(left=sol, bottom=0, right=sag, top=h) or ""
+    except Exception:
+        tam = ust = sol_serit = ""
+    finally:
+        tp.close()
+        _sayfayi_birak(page)
+    return tam, ust, sol_serit
+
+
+def _sol_serit_numaralarindan(s, unite_no=None):
+    """Sol şeridin metninden soru numaralarını çıkarır (sayfayı açmaz).
+    Açıklama için bkz. _sol_serit_numaralari."""
+    ham = [int(m) for m in re.findall(r"(?<!\d)(\d{1,3})\s*\.(?!\d)", s or "")]
+    if unite_no is not None and ham and ham[0] == unite_no:
+        ham = ham[1:]
+    gorulen, temiz = set(), []
+    for n in ham:
+        if n not in gorulen:
+            gorulen.add(n)
+            temiz.append(n)
+    return temiz
 
 
 def _sol_serit_numaralari(doc, i, sol=14, sag=54, unite_no=None):
@@ -466,15 +540,8 @@ def _sol_serit_numaralari(doc, i, sol=14, sag=54, unite_no=None):
         s = tp.get_text_bounded(left=sol, bottom=0, right=sag, top=h) or ""
     finally:
         tp.close()
-    ham = [int(m) for m in re.findall(r"(?<!\d)(\d{1,3})\s*\.(?!\d)", s)]
-    if unite_no is not None and ham and ham[0] == unite_no:
-        ham = ham[1:]
-    gorulen, temiz = set(), []
-    for n in ham:
-        if n not in gorulen:
-            gorulen.add(n)
-            temiz.append(n)
-    return temiz
+        _sayfayi_birak(page)
+    return _sol_serit_numaralarindan(s, unite_no)
 
 
 def _anahtar_bloklari(metin):
@@ -904,11 +971,19 @@ def _unite_basligi_metinden(metin):
 
     Sayfanın TAMAMINA değil ilk birkaç satırına bakılır: ünite başlığı
     her zaman sayfanın en üstündedir, gövde metnindeki 'ünite' kelimeleri
-    yanlışlıkla başlık sanılmasın."""
+    yanlışlıkla başlık sanılmasın.
+
+    ÖNEMLİ - NUMARA İLE AD BİRBİRİNDEN AYRI: Burada eskiden ad okunamazsa
+    numara da atılıyordu. Sonuç ağırdı -- sayfanın üstündeki "2. Ünite"
+    yazısındaki "2", sol şeritte soru numarası sanılıp kalıyor, sayfanın
+    numara dizisi bozuluyor ve o sayfa yanlışlıkla yeni bir ünite
+    başlatıyordu. Yani ünite ADI okunamayan kitaplarda SORULAR da kayıyordu.
+    Artık numara her zaman döndürülür; ad okunamazsa sadece ad None olur."""
     if not metin:
         return None, None
-    for satir in metin.splitlines()[:8]:
-        satir = satir.strip()
+    satirlar = [s.strip() for s in metin.splitlines()[:10]]
+    no_bulunan = None
+    for k, satir in enumerate(satirlar):
         if not satir or len(satir) > 90:
             continue
         for okunus in (_meb_duzelt(satir), _bozuk_onar(satir),
@@ -916,13 +991,51 @@ def _unite_basligi_metinden(metin):
             m = _TOC_SATIRI.match(okunus) or _TOC_SATIRI_EN.match(okunus)
             if not m:
                 continue
-            ad = _ad_temizle(m.group(2) or "")
-            if ad and _ad_puani(ad) >= 4:
-                try:
-                    return int(m.group(1)), _kelime_onar(ad)
-                except ValueError:
-                    return None, None
-    return None, None
+            try:
+                _no = int(m.group(1))
+            except ValueError:
+                continue
+            if not (1 <= _no <= 30):
+                continue
+            if no_bulunan is None:
+                no_bulunan = _no
+            adaylar = [_ad_temizle(m.group(2) or "")]
+            # ÖNEMLİ - "SADECE 1. ÜNİTE ADIYLA ÇIKIYOR, DİĞERLERİ 'ÜNİTE'":
+            # Çoğu kitapta ünite başlığı İKİ SATIR: üstte "2. ÜNİTE", altında
+            # "Millî Uyanış: Bağımsızlık Yolunda Atılan Adımlar". Burası
+            # yalnızca AYNI satıra bakıyordu; adı ayrı satırda olan bütün
+            # üniteler adsız kalıyordu. Artık sonraki iki satır da deneniyor.
+            for _sonraki in satirlar[k + 1:k + 3]:
+                if not _sonraki or len(_sonraki) > 90:
+                    continue
+                for _ok in (_meb_duzelt(_sonraki), _bozuk_onar(_sonraki),
+                            _baslik_onar(_sonraki), _kaydirmayi_coz(_sonraki)):
+                    adaylar.append(_ad_temizle(_ok))
+            adaylar = [a for a in adaylar if a]
+            if adaylar:
+                en_iyi = max(adaylar, key=_ad_puani)
+                if _ad_puani(en_iyi) >= 4:
+                    return _no, _kelime_onar(en_iyi)
+    return no_bulunan, None
+
+
+def _sayfa_dersi_metinden(duz, ust):
+    """_sayfa_dersi ile aynı iş, ama sayfayı yeniden açmadan: metinler
+    zaten okunmuş hâlde veriliyor (bkz. _sayfa_okumalari)."""
+    if duz and len(duz) < 220:
+        d = _ders_bul_kesin(duz)
+        if d:
+            return d
+    ust = _duz(ust)
+    # Koşan başlık kısadır. Uzun bir metin parçasında ders adı geçmesi,
+    # o sayfanın o derse ait olduğu anlamına gelmez.
+    if not (2 <= len(ust) <= 90):
+        return None
+    for okunus in _okunuslar(ust):
+        d = _ders_bul_kesin(okunus)
+        if d:
+            return d
+    return None
 
 
 def _sayfa_dersi(doc, i, duz):
@@ -1081,7 +1194,9 @@ def _esle(bolumler, anahtar):
     # Son çare: sırayla eşle
     return (
         list(zip(nolar, bolumler)),
-        f"kitapta {len(bolumler)} bölüm bulundu, cevap anahtarında {len(nolar)} ünite var",
+        f"kitapta {len(bolumler)} soru bölümü bulundu ama cevap anahtarında "
+        f"{len(nolar)} ünite var. Üniteler sırayla eşleştirildi -- **eklemeden önce "
+        f"'Kayıtlı Denemeler → 🔑 Cevap anahtarı' ile bir üniteyi kontrol edin**",
     )
 
 
@@ -1126,11 +1241,16 @@ def _parcala(bolum, cevaplar, parca_soru):
     return [p for p in parcalar if p["numaralar"]]
 
 
-def unite_kitabini_coz(pdf_path, parca_soru=0):
+def unite_kitabini_coz(pdf_path, parca_soru=0, ilerleme=None):
     """'Ünite / Tema' düzenindeki bir çalışma kitabını ayrıştırır.
 
     parca_soru: 0 -> her ünite tek test; 20 -> üniteler ~20 soruluk
                 parçalara bölünür (uzun ünitelerde çocuk boğulmasın diye).
+
+    ilerleme: (sayfa_no, toplam_sayfa) alan bir fonksiyon verilirse her
+              sayfada çağrılır -- arayüzde ilerleme çubuğu göstermek için.
+              Büyük kitaplarda tarama dakikalar sürebiliyor; hiçbir şey
+              görünmediği için kullanıcı program dondu sanıyordu.
 
     Döner: (testler, uyarilar) -- testler eski biçimle aynı alanlara sahip,
     böylece uygulamanın geri kalanı değişmeden çalışır."""
@@ -1192,9 +1312,15 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
                     )
             if ders not in kullanilan_dersler:
                 kullanilan_dersler.append(ders)
-            bolumler = _bolumlere_ayir(_govde_al(acik_kayit["ders"]))
+            _govde_sayfalari = _govde_al(acik_kayit["ders"])
+            bolumler = _bolumlere_ayir(_govde_sayfalari)
             if not bolumler:
-                uyarilar.append(f"{ders}: cevap anahtarı bulundu ama soru sayfaları eşleşmedi.")
+                uyarilar.append(
+                    f"❌ **{ders}**: cevap anahtarı okundu "
+                    f"({len(acik_kayit['bloklar'])} ünite) ama bu derse ait soru "
+                    f"sayfası bulunamadı (elde {len(_govde_sayfalari)} sayfa vardı). "
+                    f"Bu dersin bölümü kitapta farklı bir düzende olabilir."
+                )
                 return
             eslesme, uyari = _esle(bolumler, acik_kayit["bloklar"])
             if uyari:
@@ -1233,8 +1359,17 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
                         "tur": "unite",
                     })
 
-        for i in range(len(doc)):
-            metin = _sayfa_metni(doc, i)
+        _toplam_sayfa = len(doc)
+        for i in range(_toplam_sayfa):
+            if ilerleme is not None and (i % 5 == 0 or i == _toplam_sayfa - 1):
+                try:
+                    ilerleme(i + 1, _toplam_sayfa)
+                except Exception:
+                    pass
+            # Sayfa BİR KEZ açılıp gereken üç metin birlikte okunuyor
+            # (eskiden aynı sayfa üç ayrı kez açılıyordu -- bkz.
+            #  _sayfa_okumalari üstündeki not).
+            metin, _ust_serit, _sol_serit = _sayfa_okumalari(doc, i)
             duz = _duz(metin)
             duz_k = _duz(_kaydirmayi_coz(metin))
             # ÖNEMLİ: İçindekiler sayfası bölüm kapağı ya da cevap anahtarı
@@ -1253,17 +1388,26 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
                     pass
             if not _toc and _merkezi_kapak_mi(duz, duz_k):
                 # Geçmiş yıl LGS soruları bölümü -> kullanıcı istemiyor, atla
-                if not merkezi_basladi:
-                    uyarilar.append(
-                        "ℹ️ Kitabın sonundaki **geçmiş yıl merkezî sınav soruları** "
-                        "bölümü bilerek alınmadı. O sınavların tamamını, resmî ve "
-                        "eksiksiz hâliyle **Otomatik İndirme (Resmî EBA Arşivi)** "
-                        "bölümünden tek tuşla ekleyebilirsiniz."
-                    )
+                _merkezi_notu = (
+                    "ℹ️ Kitaptaki **geçmiş yıl merkezî sınav soruları** bölümleri "
+                    "bilerek alınmadı. O sınavların tamamını, resmî ve eksiksiz "
+                    "hâliyle **Otomatik İndirme (Resmî EBA Arşivi)** bölümünden "
+                    "tek tuşla ekleyebilirsiniz."
+                )
+                if _merkezi_notu not in uyarilar:
+                    uyarilar.append(_merkezi_notu)
                 merkezi_basladi = True
                 _kapat(acik)
                 acik = None
-                govde.clear()
+                # ÖNEMLİ - "DİĞER DERSLER NEDEN YOK" HATASININ ASIL SEBEBİ:
+                # Burada eskiden `govde.clear()` vardı, yani o ana kadar
+                # toplanan BÜTÜN ünite sayfaları çöpe atılıyordu. Çok dersli
+                # kitaplarda her dersin bölümü kendi "Merkezî Sınav Soruları"
+                # kısmıyla bitiyor; cevap anahtarları ise kitabın EN SONUNDA
+                # toplu duruyor. Yani sıra anahtarlara geldiğinde elde hiç
+                # soru sayfası kalmıyor ve hiçbir ders eklenemiyordu.
+                # Merkezî bölümün sayfaları zaten `merkezi_basladi` bayrağıyla
+                # atlanıyor; toplanmış sayfaları silmeye gerek yok.
                 continue
             _harfler = _sadece_harfler(duz)
             _harfler_k = _sadece_harfler(duz_k)
@@ -1283,6 +1427,10 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
                 # Din'in 1. ünitesi aynı numaraya düşüp birbirini eziyordu ve
                 # sonuçta tek ders ekleniyordu. Artık ders değişince o bölüm
                 # kapatılıp yenisi açılıyor.
+                if _bu_ders and _bu_ders != govde_dersi and merkezi_basladi:
+                    # Yeni bir dersin cevap anahtarı: önceki dersin merkezî
+                    # bölümü bitmiş demektir, bayrak insin.
+                    merkezi_basladi = False
                 if acik is not None and _bu_ders and acik["ders"] and _bu_ders != acik["ders"]:
                     _kapat(acik)
                     acik = None
@@ -1299,20 +1447,34 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
             if acik is not None:
                 _kapat(acik)
                 acik = None
-            if merkezi_basladi:
-                continue
-            # Bu gövde sayfası hangi derse ait? Bulunamazsa bir öncekinin
-            # dersi sürer (ders ayracından sonraki bütün sayfalar o derstir).
-            _bulunan = _sayfa_dersi(doc, i, duz)
-            if _bulunan:
+            # ÖNEMLİ - "SADECE İLK DERSİ BULUYOR" HATASININ ASIL SEBEBİ:
+            # Ders tespiti, aşağıdaki "merkezî bölüm başladıysa atla"
+            # kuralının ALTINDA duruyordu. Çok dersli bir kitapta her dersin
+            # kendi bölümü, sonunda kendi "Merkezî Sınav Soruları" kısmıyla
+            # bitiyor. O kısma gelindiğinde bayrak kalkıyor ve bir daha ASLA
+            # inmiyordu; yani kitabın geri kalanı -- Din Kültürü, İngilizce,
+            # hepsi -- hiç okunmuyordu. Kullanıcının gördüğü tam olarak buydu:
+            # tarama 91. sayfada duruyor, sadece İnkılap Tarihi çıkıyordu.
+            #
+            # Çözüm: ders tespiti HER SAYFADA yapılır. Yeni bir ders başlamışsa
+            # merkezî bayrağı iner, çünkü o bölüm bitmiş, yeni bölüm başlamıştır.
+            _bulunan = _sayfa_dersi_metinden(duz, _ust_serit)
+            if _bulunan and _bulunan != govde_dersi:
+                govde_dersi = _bulunan
+                if merkezi_basladi:
+                    merkezi_basladi = False
+            elif _bulunan:
                 govde_dersi = _bulunan
             elif adlar.get("_ders") and govde_dersi is None:
                 govde_dersi = adlar.get("_ders")
+            if merkezi_basladi:
+                continue
             _uno, _uad = _unite_basligi_metinden(metin)
             if _uad:
                 sayfa_basligi[i + 1] = (_uno, _uad)
             govde.append(
-                (i + 1, _sol_serit_numaralari(doc, i, unite_no=_uno), govde_dersi)
+                (i + 1, _sol_serit_numaralarindan(_sol_serit, unite_no=_uno),
+                 govde_dersi)
             )
         _kapat(acik)
     finally:
@@ -1329,7 +1491,7 @@ def _kitap_dersi(doc):
     return None
 
 
-def testleri_bul(pdf_path, parca_soru=0):
+def testleri_bul(pdf_path, parca_soru=0, ilerleme=None):
     """Yüklenen PDF'i tarar -- BİÇİMİ KENDİ ANLAR.
 
     Elimizde iki farklı kitap düzeni var ve kullanıcı hangisini yüklediğini
@@ -1345,7 +1507,8 @@ def testleri_bul(pdf_path, parca_soru=0):
     Döner: (testler, cevap_anahtari, uyarilar)"""
     hatalar = []
     try:
-        unite_testler, unite_uyari = unite_kitabini_coz(pdf_path, parca_soru=parca_soru)
+        unite_testler, unite_uyari = unite_kitabini_coz(
+            pdf_path, parca_soru=parca_soru, ilerleme=ilerleme)
     except Exception as e:
         unite_testler, unite_uyari = [], []
         hatalar.append(f"Ünite düzeni okunamadı: {e}")
