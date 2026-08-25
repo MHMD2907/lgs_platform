@@ -2791,12 +2791,44 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     f"✅ **{qb_file.name}** yüklendi ({qb_file.size / 1e6:.0f} MB). "
                     f"Şimdi aşağıdaki düğmeye basın 👇"
                 )
+                # ÖNEMLİ - "BEKLENMEYEN UYGULAMA HATASI / removeChild" HATASI:
+                # Bu, koddaki bir mantık hatası değil; tarayıcının, sunucuyla
+                # bağlantısı ortasında kopunca verdiği hatadır. Streamlit'in
+                # ücretsiz bulut sunucusunda uygulamanın kullanabileceği
+                # BELLEK sınırlıdır (yaklaşık 1 GB). 150-200 MB'lık bir
+                # çalışma kitabı yüklendiğinde dosyanın tamamı belleğe
+                # alınıyor, üstüne sayfa sayfa tarama geliyor ve sınır
+                # aşılıyor: sunucu kendini yeniden başlatıyor, tarayıcı da
+                # yarım kalan ekranı toparlayamayıp bu hatayı gösteriyor.
+                if qb_file.size > 60 * 1024 * 1024 and db.is_kalici():
+                    st.warning(
+                        f"⚠️ **Bu kitap bulutta taranamayabilir** "
+                        f"({qb_file.size / 1e6:.0f} MB).\n\n"
+                        f"Streamlit'in ücretsiz sunucusunda uygulamanın kullanabileceği "
+                        f"bellek sınırlıdır. Bu boyutta bir kitap yüklendiğinde sunucu "
+                        f"belleği tükenip kendini yeniden başlatıyor; ekranda "
+                        f"*\"Beklenmeyen Uygulama Hatası\"* çıkmasının sebebi budur — "
+                        f"kitapta ya da programda bir bozukluk yok.\n\n"
+                        f"**Yapılacak:** Bu kitabı **kendi bilgisayarınızda** "
+                        f"(`BASLAT.bat`) tarayın. Bilgisayarınızın `.streamlit\\\\secrets.toml` "
+                        f"dosyasına buluttaki `DB_URL` satırını da eklerseniz, yerelde "
+                        f"eklediğiniz testler **aynı veritabanına** yazılır ve kitapçıkları "
+                        f"veritabanında saklandığı için bulutta da açılır. Yani işi "
+                        f"bilgisayarda yaparsınız, çocuk tabletten çözer."
+                    )
             if qb_file is not None and st.button(
                     "📖 KİTABI TARA VE TESTLERİ BUL", type="primary",
                     use_container_width=True, key="qb_tara_btn"):
                 _qb_path = os.path.join(PRIVATE_DIR, "_soru_bankasi.pdf")
+                # Parça parça yazılıyor: getbuffer() dosyanın ikinci bir
+                # kopyasını daha bellekte tutuyordu; büyük kitaplarda bu tek
+                # başına sunucuyu devirmeye yetiyor.
+                try:
+                    qb_file.seek(0)
+                except Exception:
+                    pass
                 with open(_qb_path, "wb") as f:
-                    f.write(qb_file.getbuffer())
+                    shutil.copyfileobj(qb_file, f, 4 * 1024 * 1024)
                 with st.spinner("📖 Kitap taranıyor: üniteler, soru numaraları ve cevap "
                                 "anahtarı bulunuyor... (büyük kitaplarda 1-2 dakika sürebilir)"):
                     try:
@@ -2901,12 +2933,18 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     _secili_ders = st.selectbox("Ders", _dersler, key="qb_ders")
                     _bu_ders = [t for t in _eklenebilir if t["ders"] == _secili_ders]
 
-                    def _qb_basligi(t):
-                        """Denemenin adı. Ünite kitaplarında 'Test 3' demek
-                        anlamsız olurdu; ünite adı zaten 'konu' alanında."""
+                    def _qb_etiket_ad(t):
+                        """Denemenin ders adı OLMADAN adı -- düzenlenebilir
+                        tabloda bu değer gösterilip elle değiştirilebiliyor."""
                         if t.get("tur") == "unite":
-                            return f"{t['ders']} · {t['konu']}"
-                        return f"{t['ders']} · Test {t['test_no']} · {t['konu']}"
+                            return t["konu"]
+                        return f"Test {t['test_no']} · {t['konu']}"
+
+                    def _qb_basligi(t, ad=None):
+                        """Denemenin tam adı. Ünite kitaplarında 'Test 3' demek
+                        anlamsız olurdu; ünite adı zaten 'konu' alanında.
+                        `ad` verilirse (tablodan elle yazılmışsa) o kullanılır."""
+                        return f"{t['ders']} · {(ad or _qb_etiket_ad(t)).strip()}"
 
                     def _qb_etiket(t):
                         _nums = t.get("numaralar") or []
@@ -2951,13 +2989,69 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                             f"eklendi. Yukarıdaki **Ders** kutusundan başka bir derse "
                             f"geçebilir ya da yeni bir kitap yükleyebilirsiniz."
                         )
-                    _secilenler = st.multiselect(
-                        "Eklenecek testler",
-                        _kalan,
-                        default=_kalan,
-                        format_func=_qb_etiket,
-                        key=f"qb_secim_{_secili_ders}_{len(_kalan)}",
+                    # =====================================================
+                    #  ADLARI ELLE DÜZELTME
+                    # =====================================================
+                    # ÖNEMLİ - "HER PDF YAPISINA GÖRE KOD MU YAZACAĞIM?":
+                    # Hayır. Her yayınevinin kendi dizgisi olduğu için
+                    # ünite adının PDF'ten HER ZAMAN okunabilmesi mümkün
+                    # değil; bazı kitaplarda ad sayfada hiç yazmaz, bazısında
+                    # yazı tipi bozuktur. Program okuyabildiğini okur, geri
+                    # kalanı "3. Ünite" diye bırakır -- ve siz aşağıdaki
+                    # tablodan **adı doğrudan yazarsınız**. Yeni bir kitap
+                    # düzeni için kod değişikliği gerekmez.
+                    st.markdown("##### ✏️ Eklenecek testler — adları düzenleyebilirsiniz")
+                    st.caption(
+                        "**Ad** sütununa tıklayıp istediğiniz gibi yazın (örn. "
+                        "*3. Ünite · Basınç*). **Ekle** kutusunun işaretini "
+                        "kaldırdığınız testler eklenmez. Sorular ve cevap anahtarı "
+                        "bu düzenlemeden etkilenmez."
                     )
+                    _tablo_satirlari = [
+                        {
+                            "Ekle": True,
+                            "Ad": _qb_etiket_ad(t),
+                            "Soru": len(t.get("numaralar") or []),
+                            "Sayfa": (f"{t['sayfalar'][0]}-{t['sayfalar'][-1]}"
+                                      if t.get("sayfalar") else "—"),
+                        }
+                        for t in _kalan
+                    ]
+                    _duzenleyici = getattr(st, "data_editor", None)
+                    if _duzenleyici and _tablo_satirlari:
+                        _duzenlenmis = _duzenleyici(
+                            pd.DataFrame(_tablo_satirlari),
+                            key=f"qb_duzen_{_secili_ders}_{len(_kalan)}",
+                            use_container_width=True,
+                            hide_index=True,
+                            disabled=["Soru", "Sayfa"],
+                            column_config={
+                                "Ekle": st.column_config.CheckboxColumn(
+                                    "Ekle", width="small"),
+                                "Ad": st.column_config.TextColumn(
+                                    "Ad (düzenlenebilir)", width="large",
+                                    help="Öğrencinin listede göreceği ad."),
+                                "Soru": st.column_config.NumberColumn("Soru", width="small"),
+                                "Sayfa": st.column_config.TextColumn(
+                                    "Kitapta sayfa", width="small"),
+                            },
+                        )
+                        _secilenler, _adlar = [], {}
+                        for _i, _satir in enumerate(_duzenlenmis.to_dict("records")):
+                            if not _satir.get("Ekle"):
+                                continue
+                            _secilenler.append(_kalan[_i])
+                            _adlar[id(_kalan[_i])] = (str(_satir.get("Ad") or "").strip()
+                                                      or _qb_etiket_ad(_kalan[_i]))
+                    else:
+                        # Çok eski Streamlit sürümü: düzenlenebilir tablo yok,
+                        # eski çoklu seçim kutusuna dönülür.
+                        _secilenler = st.multiselect(
+                            "Eklenecek testler", _kalan, default=_kalan,
+                            format_func=_qb_etiket,
+                            key=f"qb_secim_{_secili_ders}_{len(_kalan)}",
+                        )
+                        _adlar = {}
                     st.caption(
                         f"{len(_secilenler)} test seçili. Her biri ayrı bir deneme olarak "
                         f"**{_hedef_kat}** bölümüne eklenir."
@@ -2969,7 +3063,7 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         _flash, _eklendi, _atlandi = [], 0, 0
                         _bar = st.progress(0.0, text="Testler ekleniyor...")
                         for _n, _t in enumerate(_secilenler, start=1):
-                            _baslik = _qb_basligi(_t)
+                            _baslik = _qb_basligi(_t, _adlar.get(id(_t)))
                             if db.exam_exists(_baslik, _kategori):
                                 _atlandi += 1
                                 _bar.progress(_n / len(_secilenler), text=f"{_n}/{len(_secilenler)}")
@@ -3780,15 +3874,24 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                 pass
             if _acikta:
                 st.error(
-                    f"🔓 **Güvenlik:** Herkese açık klasörde, cevap anahtarı İÇEREN "
-                    f"**{len(_acikta)} ham kitapçık** duruyor. Bunlar adresi tahmin "
-                    f"edilerek, giriş yapılmadan indirilebilir. Bu dosyalara artık "
-                    f"gerek yok — işlenmiş '..._guvenli.pdf' sürümleri ayrıca "
-                    f"kayıtlı."
+                    f"🔓 **Güvenlik uyarısı — {len(_acikta)} artık dosya**\n\n"
+                    f"Programın eski sürümü, internetten indirdiği kitapçıkların "
+                    f"**ham hâlini** (cevap anahtarı sayfası hâlâ içindeyken) "
+                    f"herkese açık klasöre bırakıyordu. Dosya adları tahmin "
+                    f"edilebilir olduğu için, adresi bilen biri giriş yapmadan "
+                    f"cevap anahtarını indirebilir.\n\n"
+                    f"**Bunlar çöp dosyalardır.** Denemeleriniz bu dosyaları "
+                    f"kullanmıyor; öğrenciye gösterilen kırpılmış kitapçık ayrı "
+                    f"bir dosyada ve ayrıca veritabanında duruyor."
                 )
-                with st.expander(f"Dosyaları gör ({len(_acikta)})"):
+                st.success(
+                    "✅ **Silmek hiçbir şeyi bozmaz.** Denemeler silinmez, sonuçlar "
+                    "silinmez, hiçbir şeyi yeniden yüklemeniz gerekmez. Sadece bu "
+                    "artık dosyalar diskten kalkar."
+                )
+                with st.expander(f"Silinecek dosyaları gör ({len(_acikta)})"):
                     st.code("\n".join(sorted(_acikta)))
-                if st.button("🧹 Bu dosyaları sil", type="primary", key="_ham_temizle"):
+                if st.button("🧹 Bu artık dosyaları sil", type="primary", key="_ham_temizle"):
                     _silinen = _ham_dosyalari_temizle()
                     st.session_state["_admin_flash"] = (
                         "success",
@@ -4154,9 +4257,28 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                             "Yeni kullanıcı adı", value=s["username"], key=f"newuser_{s['username']}"
                         )
                         if st.button("Kullanıcı Adını Güncelle", key=f"renamebtn_{s['username']}"):
-                            ok, msg = db.rename_student(s["username"], new_username)
+                            # ÖNEMLİ - "DEĞİŞTİRDİM AMA KAYDEDİLDİĞİNE DAİR HİÇBİR
+                            # ŞEY ÇIKMADI": Burada st.success() yazılıp hemen
+                            # ardından st.rerun() çağrılıyordu. Ekran baştan
+                            # çizildiği için o yeşil mesaj göz açıp kapayana
+                            # kadar siliniyordu; kullanıcı işlemin olup
+                            # olmadığını anlayamıyordu. Artık mesaj oturumda
+                            # saklanıp yenilemeden SONRA gösteriliyor (panelin
+                            # diğer bölümlerinde zaten böyle yapılıyordu).
+                            _eski = s["username"]
+                            ok, msg = db.rename_student(_eski, new_username)
                             if ok:
-                                st.success(msg)
+                                _yeni_ad = (new_username or "").strip().lower().replace(" ", "_")
+                                # Değiştirilen öğrenci o an oturumda seçiliyse
+                                # oturumu da yeni ada taşı, yoksa raporlar boş görünür.
+                                if st.session_state.student_name == _eski:
+                                    st.session_state.student_name = _yeni_ad
+                                st.session_state["_admin_flash"] = (
+                                    "success",
+                                    f"✅ Kullanıcı adı güncellendi: **{_eski} → {_yeni_ad}** "
+                                    f"({s['display_name']}). Geçmiş sonuçları ve yarım "
+                                    f"kalan sınavı da yeni ada taşındı.",
+                                )
                                 st.rerun()
                             else:
                                 st.error(msg)
