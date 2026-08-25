@@ -32,7 +32,7 @@ import re
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-25.4"
+SURUM = "2026-08-25.9"
 
 DERS_ADLARI = [
     "Türkçe",
@@ -505,9 +505,7 @@ def _sayfa_okumalari(doc, i, sol=14, sag=54, ust_yukseklik=60):
     return tam, ust, sol_serit
 
 
-def _sol_serit_numaralarindan(s, unite_no=None):
-    """Sol şeridin metninden soru numaralarını çıkarır (sayfayı açmaz).
-    Açıklama için bkz. _sol_serit_numaralari."""
+def _numaralari_ayikla(s, unite_no=None):
     ham = [int(m) for m in re.findall(r"(?<!\d)(\d{1,3})\s*\.(?!\d)", s or "")]
     if unite_no is not None and ham and ham[0] == unite_no:
         ham = ham[1:]
@@ -517,6 +515,29 @@ def _sol_serit_numaralarindan(s, unite_no=None):
             gorulen.add(n)
             temiz.append(n)
     return temiz
+
+
+def _sol_serit_numaralarindan(s, unite_no=None):
+    """Sol şeridin metninden soru numaralarını çıkarır (sayfayı açmaz).
+    Açıklama için bkz. _sol_serit_numaralari.
+
+    ÖNEMLİ - "İNGİLİZCE BÖLÜMÜNDE HİÇ SORU NUMARASI BULUNAMIYOR":
+    Kullanıcının kitabının İngilizce bölümü, kaydırılmış bir yazı tipiyle
+    basılmış. PDF'ten okunduğunda "13." yazısı '\x14\x16\x11' gibi görünmez
+    karakterlere dönüşüyor -- yani ortada rakam YOK, dolayısıyla hiçbir
+    soru numarası bulunamıyordu. (Teşhis raporundaki 265. sayfanın ham
+    metninde bu açıkça görülüyor.)
+
+    Artık metinde bu tür bozuk karakterler varsa onarılmış okunuşları da
+    deneniyor ve en çok numara veren okunuş kullanılıyor. Düzgün basılmış
+    sayfalarda onarım hiç devreye girmez."""
+    en_iyi = _numaralari_ayikla(s, unite_no)
+    if s and any(ord(c) < 0x20 and c not in "\r\n\t" for c in s):
+        for onarilmis in (_bozuk_onar(s), _kaydirmayi_coz(s)):
+            aday = _numaralari_ayikla(onarilmis, unite_no)
+            if len(aday) > len(en_iyi):
+                en_iyi = aday
+    return en_iyi
 
 
 def _sol_serit_numaralari(doc, i, sol=14, sag=54, unite_no=None):
@@ -736,7 +757,12 @@ DERS_TAKMA_ADLARI = {
         "Din Kültürü ve Ahlak Bilgisi", "Din Kültürü ve Ahlâk Bilgisi",
         "Din Kültürü", "Din Kültürü ve Ahlak",
     ],
-    "İngilizce": ["İngilizce", "Yabancı Dil (İngilizce)", "Yabancı Dil"],
+    # ÖNEMLİ - "İNGİLİZCE BÖLÜMÜ 'Bölüm 3' DİYE EKLENİYOR": Kullanıcının
+    # kitabında İngilizce bölümünün başlığı Türkçe değil: sayfalarda
+    # "English Adventures" yazıyor. Liste "English" yazımını tanımadığı
+    # için ders adsız kalıyor ve bölüm "Bölüm 3" diye ekleniyordu.
+    "İngilizce": ["İngilizce", "Yabancı Dil (İngilizce)", "Yabancı Dil",
+                  "English"],
     "Sosyal Bilgiler": ["Sosyal Bilgiler"],
 }
 
@@ -783,19 +809,54 @@ def _anahtar_dersi(metin):
     return _ders_bul_kesin(bas) or _ders_bul_kesin(metin[:600])
 
 
+_CEVAP_SATIRI = re.compile(r"(?<!\d)\d{1,3}\s*[\.\)]\s*[A-E](?![A-Za-zÇĞİÖŞÜçğıöşü])")
+
+
+def _anahtar_sayfasi_mi(metin):
+    """Sayfada "CEVAP ANAHTARI" YAZMASA BİLE, içeriğine bakarak orasının
+    bir cevap anahtarı sayfası olup olmadığını anlar.
+
+    ÖNEMLİ - "DİĞER DERSLERİN CEVAP ANAHTARI HİÇ BULUNAMIYOR": Kullanıcının
+    kitabında İnkılap'ın anahtarı 100., Din Kültürü'nünki 183. sayfada.
+    Program ikisini de göremiyordu, çünkü SADECE sayfada "CEVAP ANAHTARI"
+    yazısını arıyordu -- o sayfalarda başlık bozuk bir yazı tipiyle
+    basıldığı için okunamıyor. Teşhis raporunda o sayfalar "6. NNK A NOK B
+    NPK" diye görünüyordu; her karakterden 29 çıkarılınca ortaya çıkan şey
+    "11. A 12. B 13. C" -- yani düpedüz cevap anahtarı.
+
+    Bu yüzden artık YAZIYA DEĞİL İÇERİĞE bakıyoruz: sayfada bol miktarda
+    "12. C" ikilisi varsa ve düz yazı azsa, orası cevap anahtarıdır.
+    Soru sayfalarında şıklar "A)" biçiminde ve önlerinde soru numarası
+    olmadığı için karışma olmaz."""
+    if not metin:
+        return False
+    for okunus in (metin, _kaydirmayi_coz(metin)):
+        ikili = len(_CEVAP_SATIRI.findall(okunus))
+        if ikili < 25:
+            continue
+        # Cevap anahtarı sayfası ikililerle doludur, düz yazısı azdır.
+        kelime = len(re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü]{4,}", okunus))
+        if kelime <= max(40, ikili):
+            return True
+    return False
+
+
 # ÖNEMLİ: Aynı satırda bazı harfler kaydırılmış, bazıları normal olabiliyor.
 # Bu yüzden numarayla "Ünite" arasındaki ayırıcı bazen "." bazen "K" (nokta
 # karakterinin kaydırılmış hâli), boşluk yerine de "=" görünebiliyor.
 # Ayrıca kaydırılmış hâliyle "Ünite" -> "hQLWH", "Tema" -> "7HPD" olur.
 _TOC_SATIRI = re.compile(
     r"^[\s=]*(\d{1,2})[\s=]*[\.\)K]?[\s=]*"
-    r"(?:Ünite|ÜNİTE|ünite|Tema|TEMA|tema|Bölüm|BÖLÜM|hQLWH|7HPD|%|OP)"
+    r"(?:Ünite|ÜNİTE|ünite|Tema|TEMA|tema|Bölüm|BÖLÜM|hQLWH|7HPD)"
     r"[\s=]*[:\.\-]?[\s=]*(.*)$"
 )
 # İngilizce içindekiler satırı: "Unit 3: In the Kitchen ....... 231"
 _TOC_SATIRI_EN = re.compile(
     r"^\s*(?:Unit|UNIT|unit)\s*[:\.\-]?\s*(\d{1,2})\s*[:\.\-]?\s*(.*)$"
 )
+
+
+_BOZUK_NOKTA = re.compile(r"(?:\s*K){4,}")
 
 
 def _ad_temizle(ad):
@@ -807,6 +868,11 @@ def _ad_temizle(ad):
     okunamayan karakter var) ad KULLANILMAZ -- yanlış bir başlık, hiç
     başlık olmamasından kötüdür."""
     ad = ad.replace("=", " ")
+    # ÖNEMLİ: İçindekiler satırındaki nokta dizisi ("......") bozuk yazı
+    # tipinde "KKKKKKKK" diye geliyor ve ünite adının sonuna yapışıyordu
+    # ("Bir Kahraman DoğuyorKKKKKKKK T"). Boşluklu ya da bitişik, her
+    # hâlinde kesiliyor.
+    ad = _BOZUK_NOKTA.split(ad)[0]
     ad = re.split(r"[\.\s]{4,}|(?:\s[K]){4,}", ad)[0]
     ad = re.sub(r"(?:[\sK\.]){3,}$", "", ad).strip(" .:-–—")
     ad = _duz(ad)
@@ -986,6 +1052,12 @@ def _unite_basligi_metinden(metin):
     for k, satir in enumerate(satirlar):
         if not satir or len(satir) > 90:
             continue
+        # ÖNEMLİ: "11. A 12. B 13. C" gibi bir CEVAP SATIRI, başlık
+        # onarımından geçince "NNK A NOK B NPK" gibi anlamsız ama
+        # "başlık gibi" bir metne dönüşüyor ve ünite adı sanılıyordu.
+        # Ham satırda cevap ikilisi varsa o satır başlık değildir.
+        if len(_CEVAP_SATIRI.findall(satir)) >= 2:
+            continue
         for okunus in (_meb_duzelt(satir), _bozuk_onar(satir),
                        _baslik_onar(satir), _kaydirmayi_coz(satir)):
             m = _TOC_SATIRI.match(okunus) or _TOC_SATIRI_EN.match(okunus)
@@ -1156,13 +1228,29 @@ def _bolumlere_ayir(govde):
     # "1.", "2.", "3." diye numaralar var; bu sayfa sahte bir bölüm üretip
     # bütün eşleşmeyi bir kaydırıyordu (ölçüldü: 8 ünite yerine 9 bölüm).
     # Gerçek bir ünite bölümü 1'den başlar ve hiçbir numarayı atlamaz.
+    # ÖNEMLİ - "DİN KÜLTÜRÜNÜN İLK İKİ ÜNİTESİ HİÇ ÇIKMIYOR" HATASI:
+    # Burada eskiden bölümün numara dizisinin KUSURSUZ 1..N olması
+    # şart koşuluyordu. Gerçek kitapta bu neredeyse hiç olmuyor: bazı
+    # soru numaraları görsel içinde ya da farklı bir yerde basılı olduğu
+    # için okunamıyor. Ölçüldü (kullanıcının kitabı): Din Kültürü 1.
+    # ünitesinde 1-73 arası numaralardan sadece 33 ve 34 okunamamıştı --
+    # ve bu yüzden 73 soruluk ÜNİTENİN TAMAMI çöpe atılıyordu. Aynı şey
+    # 2. ünitede de olunca, 3. ünitenin soruları 1. ünitenin cevap
+    # anahtarıyla eşleşiyordu; yani sessizce YANLIŞ test üretiliyordu.
+    #
+    # Artık birkaç eksik numara bölümü elemiyor: 1'den başlaması, geriye
+    # dönmemesi ve en az %70'inin okunmuş olması yetiyor. Eksik numaralar
+    # zaten _parcala() içinde eleniyor (cevabı olmayan soru sorulmuyor).
     temiz = []
     for b in bolumler:
         n = b["numaralar"]
-        if not n or n[0] != 1:
+        if not n or n[0] != 1 or len(n) < 3:
             continue
-        if sorted(n) != list(range(1, max(n) + 1)):
-            continue
+        if n != sorted(n):
+            continue          # numaralar geri gidiyorsa bu bir bölüm değil
+        _enb = max(n)
+        if len(set(n)) < _enb * 0.7:
+            continue          # yarısından çoğu okunamamışsa güvenilmez
         temiz.append(b)
     return temiz
 
@@ -1179,18 +1267,37 @@ def _esle(bolumler, anahtar):
     sayilar = [len(b["numaralar"]) for b in bolumler]
     if sayilar == hedef:
         return list(zip(nolar, bolumler)), None
-    # Soru sayılarını sırayla tutturmaya çalış (fazlalık bölümleri atlar)
-    eslesme, j, atlanan = [], 0, 0
-    for no, adet in zip(nolar, hedef):
-        k = j
-        while k < len(bolumler) and len(bolumler[k]["numaralar"]) != adet:
-            k += 1
-        if k < len(bolumler):
-            atlanan += k - j
-            eslesme.append((no, bolumler[k]))
-            j = k + 1
-    if len(eslesme) == len(nolar):
-        return eslesme, None
+    # Soru sayılarını sırayla tutturmaya çalış (fazlalık bölümleri atlar).
+    # ÖNEMLİ: Eskiden TAM eşitlik aranıyordu. Gerçek kitapta bir ünitenin
+    # birkaç soru numarası okunamayabiliyor; o zaman hiçbir eşleşme
+    # bulunamıyor ve sıraya göre körlemesine eşleştirmeye düşülüyordu --
+    # yani yanlış cevap anahtarı. Artık makul bir yakınlık yetiyor.
+    def _yakin(a, b_):
+        return abs(a - b_) <= max(4, b_ * 0.25)
+
+    for _kesin in (True, False):
+        eslesme, j = [], 0
+        for no, adet in zip(nolar, hedef):
+            k = j
+            while k < len(bolumler):
+                _var = len(bolumler[k]["numaralar"])
+                if (_var == adet) if _kesin else _yakin(_var, adet):
+                    break
+                k += 1
+            if k < len(bolumler):
+                eslesme.append((no, bolumler[k]))
+                j = k + 1
+        if len(eslesme) == len(nolar):
+            return eslesme, None
+        if eslesme and not _kesin:
+            # Hepsi tutmadı ama bir kısmı tuttu: SADECE tutanları al.
+            # Eksik üniteyi hiç eklememek, yanlış cevap anahtarıyla
+            # eklemekten iyidir.
+            _eksik = [n for n in nolar if n not in [e[0] for e in eslesme]]
+            return eslesme, (
+                f"{len(_eksik)} ünitenin ({', '.join(str(x) for x in _eksik)}. "
+                f"ünite) soru sayfaları eşleştirilemedi, o üniteler atlandı"
+            )
     # Son çare: sırayla eşle
     return (
         list(zip(nolar, bolumler)),
@@ -1241,11 +1348,22 @@ def _parcala(bolum, cevaplar, parca_soru):
     return [p for p in parcalar if p["numaralar"]]
 
 
-def unite_kitabini_coz(pdf_path, parca_soru=0, ilerleme=None):
+def unite_kitabini_coz(pdf_path, parca_soru=0, ilerleme=None, merkezi_atla=False):
     """'Ünite / Tema' düzenindeki bir çalışma kitabını ayrıştırır.
 
     parca_soru: 0 -> her ünite tek test; 20 -> üniteler ~20 soruluk
                 parçalara bölünür (uzun ünitelerde çocuk boğulmasın diye).
+
+    merkezi_atla: True ise kitabın sonundaki "geçmiş yıl merkezî sınav
+              soruları" bölümleri taranmaz. VARSAYILAN ARTIK False --
+              yani her şey taranır.
+
+              ÖNEMLİ - NEDEN DEĞİŞTİ: Bu atlama, çok dersli kitaplarda
+              defalarca yanlış yerde devreye girip kitabın yarısının
+              okunmamasına yol açtı. "Ne çıkarsa çıksın, istemediğimi
+              eklemeden önce listeden çıkarırım" yaklaşımı çok daha
+              sağlam: program hiçbir şeyi kendi kararıyla atmıyor, karar
+              kullanıcıda kalıyor.
 
     ilerleme: (sayfa_no, toplam_sayfa) alan bir fonksiyon verilirse her
               sayfada çağrılır -- arayüzde ilerleme çubuğu göstermek için.
@@ -1339,8 +1457,19 @@ def unite_kitabini_coz(pdf_path, parca_soru=0, ilerleme=None):
                         _sayfadan = _bilgi[1]
                         if _bilgi[0] == unite_no:
                             break
+                # ÖNEMLİ - "İNGİLİZCE ÜNİTELERİNE İNKILAP'IN ADLARI
+                # YAZILIYOR": İçindekiler sayfasından okunan adlar, hangi
+                # derse ait olduğu anlaşılamadığında ortak bir havuza
+                # ("genel") düşüyor. O havuz da "kitap tek derslidir"
+                # varsayımıyla HER derse uygulanıyordu; sonuçta İngilizce'nin
+                # 1. ünitesi "Bir Kahraman Doğuyor" oluyordu. Artık ortak
+                # havuz yalnızca kitapta işlenen İLK derse uygulanıyor
+                # (kitabın önündeki içindekiler o derse aittir). Sonraki
+                # derslerde ad bulunamazsa "3. Ünite" diye kalıyor --
+                # yanlış ad göstermektense adsız bırakmak doğrusu; adı
+                # zaten ekleme ekranındaki tablodan yazabiliyorsunuz.
                 ad = _unite_adi(adlar, ders, unite_no,
-                                len((adlar.get("ders") or {})) == 0,
+                                len(kullanilan_dersler) <= 1,
                                 sayfadan=_sayfadan)
                 kok = f"{unite_no}. {tur}" + (f" · {ad}" if ad else "")
                 parcalar = _parcala(bolum, cevaplar, parca_soru)
@@ -1386,7 +1515,7 @@ def unite_kitabini_coz(pdf_path, parca_soru=0, ilerleme=None):
                     _unite_adlari_sayfa(adlar, metin)
                 except Exception:
                     pass
-            if not _toc and _merkezi_kapak_mi(duz, duz_k):
+            if merkezi_atla and not _toc and _merkezi_kapak_mi(duz, duz_k):
                 # Geçmiş yıl LGS soruları bölümü -> kullanıcı istemiyor, atla
                 _merkezi_notu = (
                     "ℹ️ Kitaptaki **geçmiş yıl merkezî sınav soruları** bölümleri "
@@ -1413,7 +1542,9 @@ def unite_kitabini_coz(pdf_path, parca_soru=0, ilerleme=None):
             _harfler_k = _sadece_harfler(duz_k)
             if not _toc and ("CEVAPANAHTARI" in _harfler or "CEVAPANAHTARI" in _harfler_k
                              # İngilizce bölümlerinde başlık "Answer Key" olur
-                             or "ANSWERKEY" in _harfler or "ANSWERKEY" in _harfler_k):
+                             or "ANSWERKEY" in _harfler or "ANSWERKEY" in _harfler_k
+                             # Başlık okunamasa bile içeriğinden anla
+                             or _anahtar_sayfasi_mi(metin)):
                 bloklar = _anahtar_bloklari(metin)
                 if not bloklar:
                     _kapat(acik)
@@ -1491,7 +1622,7 @@ def _kitap_dersi(doc):
     return None
 
 
-def testleri_bul(pdf_path, parca_soru=0, ilerleme=None):
+def testleri_bul(pdf_path, parca_soru=0, ilerleme=None, merkezi_atla=False):
     """Yüklenen PDF'i tarar -- BİÇİMİ KENDİ ANLAR.
 
     Elimizde iki farklı kitap düzeni var ve kullanıcı hangisini yüklediğini
@@ -1508,7 +1639,8 @@ def testleri_bul(pdf_path, parca_soru=0, ilerleme=None):
     hatalar = []
     try:
         unite_testler, unite_uyari = unite_kitabini_coz(
-            pdf_path, parca_soru=parca_soru, ilerleme=ilerleme)
+            pdf_path, parca_soru=parca_soru, ilerleme=ilerleme,
+            merkezi_atla=merkezi_atla)
     except Exception as e:
         unite_testler, unite_uyari = [], []
         hatalar.append(f"Ünite düzeni okunamadı: {e}")

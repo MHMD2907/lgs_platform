@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-25.4"
+SURUM = "2026-08-25.9"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -2821,6 +2821,22 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                 "Bu ayar sadece **ünite/tema** düzenli kitapları etkiler; konu testli soru "
                 "bankalarında testler zaten kısa olduğu için bölünmez."
             )
+            # ÖNEMLİ - KULLANICI ÖNERİSİ (ve doğru olan): Program eskiden
+            # kitabın "geçmiş yıl merkezî sınav soruları" bölümlerini KENDİ
+            # KARARIYLA atıyordu. Bu atlama çok dersli kitaplarda defalarca
+            # yanlış yerde devreye girip kitabın yarısının hiç okunmamasına
+            # yol açtı. Artık VARSAYILAN "her şeyi tara": ne çıkarsa çıksın
+            # listede görürsünüz, istemediğinizi eklemeden önce listeden
+            # çıkarırsınız. Karar programda değil sizde.
+            _merkezi_atla = st.checkbox(
+                "Kitabın sonundaki **geçmiş yıl merkezî sınav sorularını** tarama dışı bırak",
+                value=False, key="qb_merkezi",
+                help=("Kapalı bırakın (önerilen): kitapta ne varsa bulunur, "
+                      "istemediğiniz testleri aşağıdaki listeden tek tıkla "
+                      "çıkarabilirsiniz. Açarsanız program o bölümleri kendi "
+                      "kararıyla atlar -- bazı kitaplarda yanlış yerde devreye "
+                      "girip ders kaybına yol açabiliyor."),
+            )
 
             # ÖNEMLİ - KULLANICI GERİ BİLDİRİMİ: Yeni bir kitap yüklendiğinde
             # ekranda ÖNCEKİ kitabın testleri duruyordu; hangi kitaba
@@ -2895,10 +2911,16 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         pass
 
                 try:
-                    _testler, _anahtar, _uyarilar = soru_bankasi.testleri_bul(
-                        _qb_path, parca_soru=_parca_secenek[_parca_ad],
-                        ilerleme=_tara_ilerleme,
-                    )
+                    try:
+                        _testler, _anahtar, _uyarilar = soru_bankasi.testleri_bul(
+                            _qb_path, parca_soru=_parca_secenek[_parca_ad],
+                            ilerleme=_tara_ilerleme, merkezi_atla=_merkezi_atla,
+                        )
+                    except TypeError:
+                        # Eski soru_bankasi.py: 'merkezi_atla' parametresini tanımaz.
+                        _testler, _anahtar, _uyarilar = soru_bankasi.testleri_bul(
+                            _qb_path, parca_soru=_parca_secenek[_parca_ad],
+                        )
                 except MemoryError:
                     _testler, _anahtar, _uyarilar = [], {}, [
                         "Bellek yetmedi: bu kitap tek seferde taranamıyor. "
