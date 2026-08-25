@@ -26,6 +26,14 @@ if errorlevel 1 (
     )
 )
 
+rem --- ONEMLI: Eski derlenmis kod artiklarini temizle -------------------
+rem Python, her .py dosyasinin derlenmis halini __pycache__ klasorunde
+rem saklar. Guncellenen dosyalar yerine bu eski kopyalarin kullanilmasi,
+rem "dosyalari degistirdim ama hicbir sey degismedi" durumunun en sik
+rem sebeplerinden biridir. Her baslangicta temizliyoruz -- kaybi yok,
+rem Python gerekirse yeniden uretir.
+if exist "__pycache__" rd /s /q "__pycache__" >nul 2>&1
+
 echo [1/3] Gerekli kutuphaneler kontrol ediliyor...
 echo       (Ilk calistirmada birkac dakika surebilir, lutfen bekleyin)
 echo.

@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-25.3"
+SURUM = "2026-08-25.4"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -2677,6 +2677,43 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
             expanded=not _hepsi_guncel,
         ):
             _tablo(pd.DataFrame(_sur))
+            # ÖNEMLİ - "DOSYALARI DEĞİŞTİRDİM AMA HİÇBİR ŞEY DEĞİŞMEDİ":
+            # Uygulama çalışırken yardımcı dosyalar (db.py, soru_bankasi.py...)
+            # bir kez belleğe alınır ve orada kalır. Dosyanın diskteki hâlini
+            # değiştirseniz bile çalışan program ESKİ kopyayı kullanmaya devam
+            # eder. Bu düğme onları bellekten atıp diskten yeniden okur --
+            # yani programı kapatıp açmadan güncellemeyi devreye alır.
+            _rc1, _rc2 = st.columns([2, 3])
+            if _rc1.button("🔄 Kodu diskten yeniden yükle", type="primary",
+                           use_container_width=True, key="_kod_yenile"):
+                import importlib
+                _hata = []
+                for _mod in (config, db, parsing, scoring, soru_bankasi, bot, drive_sync):
+                    try:
+                        importlib.reload(_mod)
+                    except Exception as _e:
+                        _hata.append(f"{getattr(_mod, '__name__', '?')}: {_e}")
+                try:
+                    st.cache_data.clear()
+                    st.cache_resource.clear()
+                except Exception:
+                    pass
+                # Taranmış kitap sonucu da eski koddan kalmış olabilir.
+                for _k in ("_qb_testler", "_qb_uyarilar", "_qb_tarama_bilgi"):
+                    st.session_state.pop(_k, None)
+                st.session_state["_admin_flash"] = (
+                    ("error", "Bazı dosyalar yeniden yüklenemedi: " + "; ".join(_hata))
+                    if _hata else
+                    ("success", "🔄 Bütün dosyalar diskten yeniden okundu. "
+                                "Yukarıdaki sürüm tablosunda beklediğiniz sürümler "
+                                "yazıyorsa güncelleme devrede demektir.")
+                )
+                st.rerun()
+            _rc2.caption(
+                "Dosyaları değiştirdiniz ama ekranda bir şey değişmediyse önce "
+                "bu düğmeye basın. Sürüm tablosu hâlâ eski sürümü gösteriyorsa "
+                "dosya gerçekten güncellenmemiştir."
+            )
             st.caption(
                 "Bu tablo, uygulamanın **şu anda çalıştırdığı** dosyaları gösterir. "
                 "GitHub'daki tarihlere bakmayın: içeriği değişmeyen bir dosya için "
@@ -2874,11 +2911,30 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                 st.session_state[qb_path_state] = _qb_path
                 st.session_state["_qb_testler"] = _testler
                 st.session_state["_qb_uyarilar"] = _uyarilar
+                # Hangi dosya, hangi kod sürümü, saat kaçta tarandı? Ekranda
+                # eski bir tarama sonucuna bakıp "hâlâ düzelmemiş" sanmayın diye.
+                st.session_state["_qb_tarama_bilgi"] = {
+                    "dosya": qb_file.name,
+                    "surum": getattr(soru_bankasi, "SURUM", "?"),
+                    "saat": datetime.now().strftime("%H:%M:%S"),
+                }
                 st.session_state["_islem_balon"] = bool(_testler)
                 st.rerun()
 
             _testler = st.session_state.get("_qb_testler")
             if _testler:
+                _bilgi = st.session_state.get("_qb_tarama_bilgi") or {}
+                _bc1, _bc2 = st.columns([4, 1])
+                _bc1.caption(
+                    f"📄 Ekrandaki sonuç: **{_bilgi.get('dosya', '?')}** · "
+                    f"saat {_bilgi.get('saat', '?')} · tarayıcı sürümü "
+                    f"**{_bilgi.get('surum', '?')}**"
+                )
+                if _bc2.button("🗑️ Sonucu temizle", key="_qb_temizle",
+                               use_container_width=True):
+                    for _k in ("_qb_testler", "_qb_uyarilar", "_qb_tarama_bilgi"):
+                        st.session_state.pop(_k, None)
+                    st.rerun()
                 _eklenebilir = [t for t in _testler if t.get("cevaplar") and t.get("numaralar")]
                 st.success(
                     f"Kitapta **{len(_testler)} test** bulundu; bunlardan "
