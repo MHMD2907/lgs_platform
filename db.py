@@ -22,7 +22,7 @@ from datetime import datetime
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lgs_platform.db")
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-22.5"
+SURUM = "2026-08-25.1"
 
 DEFAULT_CATEGORIES = [
     "8. Sınıf (LGS)",
@@ -588,6 +588,31 @@ def rename_student(old_username, new_username):
             return False, "Bu kullanıcı adı zaten başka bir öğrenci tarafından kullanılıyor."
     conn.execute("UPDATE students SET username = ? WHERE username = ?", (new_username, old_username))
     conn.execute("UPDATE results SET student_name = ? WHERE student_name = ?", (new_username, old_username))
+    # ONEMLI - CEVAP KAYBI: Burada eskiden SADECE students ve results
+    # guncelleniyordu. Ogrencinin YARIM KALMIS sinavi in_progress
+    # tablosunda eski kullanici adina bagli kaliyor ve isaretledigi tum
+    # cevaplar erisilemez oluyordu. "Yanlislari duzeltme turu"nun hangi
+    # sorulari soracagi da settings tablosunda kullanici adiyla saklandigi
+    # icin o da kopuyordu. Ucu birden tasiniyor.
+    conn.execute(
+        "UPDATE in_progress SET student_name = ? WHERE student_name = ?",
+        (new_username, old_username),
+    )
+    try:
+        _eski_onek = f":{old_username}:"
+        _yeni_onek = f":{new_username}:"
+        _satirlar = conn.execute(
+            "SELECT key, value FROM settings WHERE key LIKE ?", ("wrongmode:%",)
+        ).fetchall()
+        for _s in _satirlar:
+            if _eski_onek in _s["key"]:
+                _yeni = _s["key"].replace(_eski_onek, _yeni_onek, 1)
+                conn.execute("DELETE FROM settings WHERE key = ?", (_yeni,))
+                conn.execute(
+                    "UPDATE settings SET key = ? WHERE key = ?", (_yeni, _s["key"])
+                )
+    except Exception:
+        pass  # settings tablosu eski kurulumlarda olmayabilir
     conn.commit()
     conn.close()
     return True, "Kullanıcı adı güncellendi."
@@ -863,6 +888,13 @@ def delete_exam(exam_id):
             conn.execute(_sql, (exam_id,))
         except Exception:
             pass
+    # "Yanlislari duzeltme turu"nun hangi sorulari soracagi settings
+    # tablosunda "wrongmode:<deneme>:<ogrenci>:<tur>" anahtariyla duruyor.
+    # Deneme silinince bunlar da silinmeli; yoksa tablo sonsuza dek buyur.
+    try:
+        conn.execute("DELETE FROM settings WHERE key LIKE ?", (f"wrongmode:{exam_id}:%",))
+    except Exception:
+        pass
     conn.commit()
     conn.close()
     if row:
@@ -1176,3 +1208,84 @@ def exam_pdf_guncelle(exam_id, pdf_path, pdf_path_original=None):
         conn.execute("UPDATE exams SET pdf_path = ? WHERE id = ?", (pdf_path, exam_id))
     conn.commit()
     conn.close()
+
+
+# =====================================================================
+#  OTURUMUN SAYFA YENİLEMEDE KAYBOLMAMASI
+# =====================================================================
+# ÖNEMLİ - "SAYFAYI YENİLEYİNCE PROGRAMDAN ÇIKIYORUM": Streamlit'in oturum
+# belleği (session_state) tarayıcı bağlantısına bağlıdır. F5'e basmak,
+# sekmeyi kapatıp açmak, tablette uygulamayı arka plana atıp geri dönmek --
+# bunların hepsi YENİ bir oturum başlatır ve o bellek boşalır; kullanıcı
+# giriş yapmamış sayılır.
+#
+# Çözüm: girişten sonra tarayıcının adres çubuğuna imzalı bir "giriş
+# jetonu" konur (?oturum=...). Sayfa yenilendiğinde adres aynı kaldığı için
+# jeton geri okunur ve oturum kendiliğinden kurulur.
+#
+# Jeton ŞİFRE İÇERMEZ: sadece kullanıcı adı, rol ve son kullanma tarihi
+# vardır; bunlar sunucuda saklanan gizli bir anahtarla (HMAC) imzalanır.
+# İmza tutmuyorsa jeton yok sayılır -- yani elle uydurulamaz.
+
+import hmac
+import base64
+import time
+
+_JETON_OMRU = 30 * 24 * 3600  # 30 gün
+
+
+def _imza_anahtari():
+    """Jetonları imzalamak için kullanılan gizli anahtar (veritabanında
+    saklanır, ilk çağrıda üretilir)."""
+    deger = get_setting("_oturum_imza_anahtari")
+    if not deger:
+        deger = secrets.token_hex(32)
+        set_setting("_oturum_imza_anahtari", deger)
+    return deger.encode("utf-8")
+
+
+def _imzala(govde):
+    return hmac.new(_imza_anahtari(), govde.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+
+
+def oturum_jetonu_uret(kullanici, rol="ogrenci"):
+    """Giriş yapan kişi için adres çubuğuna konacak imzalı jeton üretir."""
+    if not kullanici:
+        return ""
+    govde = f"{rol}|{kullanici}|{int(time.time()) + _JETON_OMRU}"
+    ham = f"{govde}|{_imzala(govde)}"
+    return base64.urlsafe_b64encode(ham.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def oturum_jetonu_coz(jeton):
+    """Jetonu doğrular. Geçerliyse (rol, kullanici) döner, değilse (None, None).
+
+    Jeton geçerli olsa bile hesabın HÂLÂ var olduğu veritabanından
+    doğrulanır -- silinmiş bir öğrencinin eski jetonu işe yaramaz."""
+    if not jeton:
+        return None, None
+    try:
+        ham = base64.urlsafe_b64decode(jeton + "=" * (-len(jeton) % 4)).decode("utf-8")
+        rol, kullanici, bitis, imza = ham.split("|")
+    except Exception:
+        return None, None
+    govde = f"{rol}|{kullanici}|{bitis}"
+    if not hmac.compare_digest(imza, _imzala(govde)):
+        return None, None
+    try:
+        if int(bitis) < time.time():
+            return None, None
+    except ValueError:
+        return None, None
+    tablo = "admins" if rol == "yonetici" else "students"
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            f"SELECT username, display_name FROM {tablo} WHERE username = ?", (kullanici,)
+        ).fetchone()
+    except Exception:
+        row = None
+    conn.close()
+    if not row:
+        return None, None
+    return rol, dict(row)

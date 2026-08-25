@@ -32,7 +32,7 @@ import re
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-22.5"
+SURUM = "2026-08-25.1"
 
 DERS_ADLARI = [
     "Türkçe",
@@ -445,12 +445,20 @@ def _sayfa_metni(doc, i):
         tp.close()
 
 
-def _sol_serit_numaralari(doc, i, sol=14, sag=54):
+def _sol_serit_numaralari(doc, i, sol=14, sag=54, unite_no=None):
     """Sayfanın SOL KENARINDAKİ dar şeritte basılı soru numaralarını verir.
 
     Neden dar şerit: gövde metninde de "1990. yılda" gibi sayılar geçiyor;
     soru numarası ise her zaman sol kenarda, kendi başına duruyor. Ölçüldü:
-    bu kitaplarda soru numaraları x≈28'de başlıyor, gövde metni x≈40+."""
+    bu kitaplarda soru numaraları x≈28'de başlıyor, gövde metni x≈40+.
+
+    ÖNEMLİ - ÜNİTE BAŞLIĞI TUZAĞI: Sayfanın en üstündeki "2. Ünite" yazısı
+    da sol kenardadır ve buraya "2" olarak düşüyordu. Sonucu ağırdı: o
+    sayfanın numara dizisi 1 yerine 2 ile başlıyor, bu yüzden "yeni ünite
+    başladı" kuralı çalışmıyor ve iki ünite tek üniteye yapışıyordu; üstelik
+    dizi 1..N düzgünlüğünü kaybettiği için bölüm komple eleniyordu. Sayfada
+    okunan ünite numarası biliniyorsa (bkz. _unite_basligi_metinden) baştaki
+    o sayı atılıyor. Aynı sayfada tekrarlayan numaralar da ayıklanıyor."""
     page = doc[i]
     h = page.get_height()
     tp = page.get_textpage()
@@ -458,7 +466,15 @@ def _sol_serit_numaralari(doc, i, sol=14, sag=54):
         s = tp.get_text_bounded(left=sol, bottom=0, right=sag, top=h) or ""
     finally:
         tp.close()
-    return [int(m) for m in re.findall(r"(?<!\d)(\d{1,3})\s*\.(?!\d)", s)]
+    ham = [int(m) for m in re.findall(r"(?<!\d)(\d{1,3})\s*\.(?!\d)", s)]
+    if unite_no is not None and ham and ham[0] == unite_no:
+        ham = ham[1:]
+    gorulen, temiz = set(), []
+    for n in ham:
+        if n not in gorulen:
+            gorulen.add(n)
+            temiz.append(n)
+    return temiz
 
 
 def _anahtar_bloklari(metin):
@@ -507,29 +523,24 @@ def _anahtar_bloklari(metin):
 
 
 def _cevaplari_ayikla(parca):
-    """Bir metin parçasındaki '12. C' biçimindeki cevapları toplar."""
+    """Bir metin parçasındaki '12. C' biçimindeki cevapları toplar.
+
+    NOT: Burada eskiden m.group(3) / m.group(4) da okunuyordu; oysa
+    _CEVAP_BITISIK deseninde sadece 2 grup var. Kod bugüne kadar patlamadı
+    çünkü group(1) hep dolu ve 'or' kısa devre yapıyordu -- ama desen bir
+    gün değişirse IndexError ile tarama komple çökerdi."""
     cevaplar = {}
     for m in _CEVAP_BITISIK.finditer(parca):
-        no = m.group(1) or m.group(3)
-        harf = m.group(2) or m.group(4)
+        no, harf = m.group(1), m.group(2)
         if no and harf:
             cevaplar[int(no)] = harf
     return cevaplar
 
 
-def _anahtar_dersi(metin):
-    """Cevap anahtarı sayfasının başlığındaki ders adını bulur."""
-    for satir in metin.splitlines()[:6]:
-        L = _duz(satir)
-        if not L or "CEVAP" in L.upper():
-            continue
-        d = _ayrac_dersi(L)
-        if d:
-            return d
-    for d in DERS_ADLARI:
-        if _altdizi_mi(_sadece_harfler(d), _sadece_harfler(metin[:400])):
-            return d
-    return None
+# NOT: Burada ikinci bir _anahtar_dersi tanımı vardı (harf sırasına bakan
+# eski yöntem). Aşağıda, dosyanın ilerisinde aynı adla ikinci bir tanım
+# olduğu için Python zaten hep onu kullanıyordu -- bu ölü kopya kaldırıldı.
+# Geçerli tanım için "def _anahtar_dersi" aramasına devam edin.
 
 
 # --- MEB PDF'lerindeki bozuk yazı tipi kodlamasını onarma ------------------
@@ -859,16 +870,98 @@ def _unite_adlari_sayfa(adlar, _sayfa):
     return adlar
 
 
-def _unite_adi(adlar, ders, no, tek_ders):
-    """Ünite adını seçer. Çok dersli kitapta YANLIŞ ad göstermektense
-    hiç ad göstermemeyi tercih ediyoruz."""
+def _unite_adi(adlar, ders, no, tek_ders, sayfadan=None):
+    """Ünite adını seçer.
+
+    ÖNEMLİ - "BAZI ÜNİTELER SADECE '1. Ünite' DİYE EKLENİYOR": Ünite adı
+    yalnızca İÇİNDEKİLER sayfasından okunuyordu. İçindekileri olmayan,
+    bozuk yazı tipiyle basılmış ya da çok dersli olduğu için adı hangi
+    derse yazacağımızı bilemediğimiz kitaplarda ad boş kalıyor ve deneme
+    "3. Ünite" diye ekleniyordu.
+
+    Artık üç kaynak sırayla deneniyor:
+      1. İçindekilerde (ders, no) ikilisine yazılmış ad -- en güvenilir.
+      2. ÜNİTENİN KENDİ İLK SAYFASINDAKİ başlık (`sayfadan`) -- kitapta
+         ne yazıyorsa o. Çok dersli kitaplarda bile karışma riski yok,
+         çünkü ad o ünitenin kendi sayfasından geliyor.
+      3. Tek dersli kitapsa içindekilerdeki numaraya göre genel ad.
+    """
     if not adlar:
-        return None
+        return sayfadan
     _d = (adlar.get("ders") or {}).get((ders, no))
     if _d:
         return _d
+    if sayfadan:
+        return sayfadan
     if tek_ders:
         return (adlar.get("genel") or {}).get(no)
+    return None
+
+
+def _unite_basligi_metinden(metin):
+    """Bir sayfanın ilk satırlarından '1. Ünite: Çarpanlar ve Katlar'
+    biçimindeki başlığı okur. Döner: (unite_no, ad) ya da (None, None).
+
+    Sayfanın TAMAMINA değil ilk birkaç satırına bakılır: ünite başlığı
+    her zaman sayfanın en üstündedir, gövde metnindeki 'ünite' kelimeleri
+    yanlışlıkla başlık sanılmasın."""
+    if not metin:
+        return None, None
+    for satir in metin.splitlines()[:8]:
+        satir = satir.strip()
+        if not satir or len(satir) > 90:
+            continue
+        for okunus in (_meb_duzelt(satir), _bozuk_onar(satir),
+                       _baslik_onar(satir), _kaydirmayi_coz(satir)):
+            m = _TOC_SATIRI.match(okunus) or _TOC_SATIRI_EN.match(okunus)
+            if not m:
+                continue
+            ad = _ad_temizle(m.group(2) or "")
+            if ad and _ad_puani(ad) >= 4:
+                try:
+                    return int(m.group(1)), _kelime_onar(ad)
+                except ValueError:
+                    return None, None
+    return None, None
+
+
+def _sayfa_dersi(doc, i, duz):
+    """Bir GÖVDE sayfası hangi derse ait? Bulunamazsa None (önceki ders sürer).
+
+    ÖNEMLİ - "SÖZEL KİTABINDA SADECE İNKILAP TARİHİ ÇIKIYOR": Çok dersli
+    kitaplarda (İnkılap + Din Kültürü + İngilizce tek dosyada) bütün
+    derslerin soruları önce, bütün cevap anahtarları sonra geliyor. Kod
+    gövde sayfalarının HANGİ DERSE ait olduğunu hiç takip etmediği için
+    ilk cevap anahtarı sayfası bütün kitabı tek bir derse (ilk tanınan
+    derse) mal ediyor, diğer iki ders hiç eklenemiyordu.
+
+    Bu fonksiyon iki yere bakar:
+      1. Ders ayraç/kapak sayfası -- çok az metin içerir, ortasında ders adı.
+      2. Sayfanın en üstündeki koşan başlık ("DİN KÜLTÜRÜ VE AHLAK BİLGİSİ").
+    İkisi de bulunamazsa None döner ve o sayfa bir önceki derse sayılır."""
+    if duz and len(duz) < 220:
+        d = _ders_bul_kesin(duz)
+        if d:
+            return d
+    try:
+        page = doc[i]
+        h, w = page.get_height(), page.get_width()
+        tp = page.get_textpage()
+        try:
+            ust = tp.get_text_bounded(left=0, bottom=h - 60, right=w, top=h) or ""
+        finally:
+            tp.close()
+    except Exception:
+        return None
+    ust = _duz(ust)
+    # Koşan başlık kısadır. Uzun bir metin parçasında ders adı geçmesi,
+    # o sayfanın o derse ait olduğu anlamına gelmez.
+    if not (2 <= len(ust) <= 90):
+        return None
+    for okunus in _okunuslar(ust):
+        d = _ders_bul_kesin(okunus)
+        if d:
+            return d
     return None
 
 
@@ -932,8 +1025,17 @@ def _bolumlere_ayir(govde):
     for b in bolumler:
         gorulen = set()
         for k, (sayfa, nums) in enumerate(b["sayfa_numaralari"]):
-            yeni_nums = [n for n in nums if n not in gorulen]
-            gorulen.update(yeni_nums)
+            # NOT: Burada eskiden liste kavrayışı kullanılıyordu; `gorulen`
+            # ancak kavrayış bittikten sonra güncellendiği için AYNI SAYFADA
+            # iki kez geçen bir numara elenmiyordu. Tek bir tekrar bile
+            # "sorted(numaralar) == 1..N" kuralını bozup bölümün tamamen
+            # elenmesine yol açıyordu.
+            yeni_nums = []
+            for n in nums:
+                if n in gorulen:
+                    continue
+                gorulen.add(n)
+                yeni_nums.append(n)
             b["sayfa_numaralari"][k] = (sayfa, yeni_nums)
         b["numaralar"] = [n for _s, ns in b["sayfa_numaralari"] for n in ns]
 
@@ -1039,11 +1141,36 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
     try:
         adlar = _unite_adlari(doc)
         kitap_dersi = _kitap_dersi(doc)
+        # govde: [(sayfa_no, [soru numaralari], ders)] -- ders, o sayfanin
+        # hangi derse ait oldugu (bkz. _sayfa_dersi). Liste YERINDE
+        # degistiriliyor (clear/remove), yeniden atanmiyor: _kapat() bunu
+        # bir kapanis olarak kullaniyor.
         govde = []
+        # sayfa_no -> (unite_no, unite_adi): o sayfanin ustunde yazan baslik.
+        sayfa_basligi = {}
         acik = None
         merkezi_basladi = False
+        govde_dersi = kitap_dersi   # o an hangi dersin sayfalarındayız
 
         kullanilan_dersler = []
+
+        def _govde_al(ders):
+            """Bu derse ait gövde sayfalarını havuzdan alır ve havuzdan siler.
+
+            ÇOK DERSLİ KİTAPLAR: Bütün derslerin soruları önce, bütün cevap
+            anahtarları sonra geliyorsa, her dersin anahtarı kendi
+            sayfalarını buradan çeker. Ders etiketi hiç bulunamamışsa
+            (tek dersli kitap) havuzda ne varsa hepsi verilir -- yani eski
+            davranış aynen korunur."""
+            if ders:
+                secili = [g for g in govde if g[2] == ders]
+                if secili:
+                    for g in secili:
+                        govde.remove(g)
+                    return [(s, n) for s, n, _d in secili]
+            secili = list(govde)
+            govde.clear()
+            return [(s, n) for s, n, _d in secili]
 
         def _kapat(acik_kayit):
             if not acik_kayit or not acik_kayit["bloklar"]:
@@ -1065,7 +1192,7 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
                     )
             if ders not in kullanilan_dersler:
                 kullanilan_dersler.append(ders)
-            bolumler = _bolumlere_ayir(acik_kayit["govde"])
+            bolumler = _bolumlere_ayir(_govde_al(acik_kayit["ders"]))
             if not bolumler:
                 uyarilar.append(f"{ders}: cevap anahtarı bulundu ama soru sayfaları eşleşmedi.")
                 return
@@ -1075,8 +1202,20 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
             for unite_no, bolum in eslesme:
                 blok = acik_kayit["bloklar"][unite_no]
                 cevaplar, tur = blok["cevaplar"], blok.get("tur") or "Ünite"
+                # Ünitenin KENDİ sayfalarındaki başlıktan ad okumayı dene --
+                # içindekiler sayfası olmayan kitaplarda tek ad kaynağı bu.
+                _sayfadan = None
+                for _s in bolum.get("sayfalar", []):
+                    _bilgi = sayfa_basligi.get(_s)
+                    if _bilgi and _bilgi[1]:
+                        # Numarası da tutuyorsa daha güvenilir; tutmuyorsa
+                        # yine de o sayfanın başlığı bu ünitenindir.
+                        _sayfadan = _bilgi[1]
+                        if _bilgi[0] == unite_no:
+                            break
                 ad = _unite_adi(adlar, ders, unite_no,
-                                len((adlar.get("ders") or {})) == 0)
+                                len((adlar.get("ders") or {})) == 0,
+                                sayfadan=_sayfadan)
                 kok = f"{unite_no}. {tur}" + (f" · {ad}" if ad else "")
                 parcalar = _parcala(bolum, cevaplar, parca_soru)
                 for pno, parca in enumerate(parcalar, start=1):
@@ -1123,7 +1262,8 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
                     )
                 merkezi_basladi = True
                 _kapat(acik)
-                acik, govde = None, []
+                acik = None
+                govde.clear()
                 continue
             _harfler = _sadece_harfler(duz)
             _harfler_k = _sadece_harfler(duz_k)
@@ -1133,11 +1273,23 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
                 bloklar = _anahtar_bloklari(metin)
                 if not bloklar:
                     _kapat(acik)
-                    acik, govde = None, []
+                    acik = None
                     continue
+                _bu_ders = _anahtar_dersi(metin)
+                # ÖNEMLİ - ÇOK DERSLİ KİTAP: Arka arkaya gelen cevap anahtarı
+                # sayfaları FARKLI derslere ait olabilir (sözel kitabında
+                # İnkılap, Din Kültürü ve İngilizce peş peşe). Eskiden hepsi
+                # AÇIK OLAN tek kayda ekleniyordu; İnkılap'ın 1. ünitesiyle
+                # Din'in 1. ünitesi aynı numaraya düşüp birbirini eziyordu ve
+                # sonuçta tek ders ekleniyordu. Artık ders değişince o bölüm
+                # kapatılıp yenisi açılıyor.
+                if acik is not None and _bu_ders and acik["ders"] and _bu_ders != acik["ders"]:
+                    _kapat(acik)
+                    acik = None
                 if acik is None:
-                    acik = {"ders": _anahtar_dersi(metin), "bloklar": {}, "govde": govde}
-                    govde = []
+                    acik = {"ders": _bu_ders, "bloklar": {}}
+                elif not acik["ders"] and _bu_ders:
+                    acik["ders"] = _bu_ders
                 for no, blok in bloklar.items():
                     hedef = acik["bloklar"].setdefault(
                         no, {"tur": blok["tur"], "cevaplar": {}}
@@ -1146,10 +1298,22 @@ def unite_kitabini_coz(pdf_path, parca_soru=0):
                 continue
             if acik is not None:
                 _kapat(acik)
-                acik, govde = None, []
+                acik = None
             if merkezi_basladi:
                 continue
-            govde.append((i + 1, _sol_serit_numaralari(doc, i)))
+            # Bu gövde sayfası hangi derse ait? Bulunamazsa bir öncekinin
+            # dersi sürer (ders ayracından sonraki bütün sayfalar o derstir).
+            _bulunan = _sayfa_dersi(doc, i, duz)
+            if _bulunan:
+                govde_dersi = _bulunan
+            elif adlar.get("_ders") and govde_dersi is None:
+                govde_dersi = adlar.get("_ders")
+            _uno, _uad = _unite_basligi_metinden(metin)
+            if _uad:
+                sayfa_basligi[i + 1] = (_uno, _uad)
+            govde.append(
+                (i + 1, _sol_serit_numaralari(doc, i, unite_no=_uno), govde_dersi)
+            )
         _kapat(acik)
     finally:
         doc.close()

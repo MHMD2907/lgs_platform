@@ -1,6 +1,9 @@
 streamlit>=1.35
 pandas>=2.0
 pdfplumber>=0.11
+pypdfium2>=4.18   # PDF sayfalarını resme çevirme + hızlı metin okuma. pdfplumber
+                  # bunu dolaylı olarak kuruyordu ama kod DOĞRUDAN kullanıyor;
+                  # açıkça yazılmazsa bir gün sessizce kaybolabilir.
 PyPDF2>=3.0
 pycryptodome>=3.20   # MEB'in resmi LGS PDF'leri şifreli (AES) olduğu için gerekli
 requests>=2.31

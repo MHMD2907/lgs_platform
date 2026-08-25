@@ -23,7 +23,7 @@ import tempfile
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-22.5"
+SURUM = "2026-08-25.1"
 from PyPDF2 import PdfReader, PdfWriter
 
 try:
@@ -298,7 +298,12 @@ def merge_full(file_specs, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "wb") as f_out:
         writer.write(f_out)
-    _compress_pdf_for_display(output_path)
+    # NOT: Burada eskiden _compress_pdf_for_display() cagriliyordu; yani
+    # YONETICININ ARSIVLIK ORIJINAL kopyasi da her sayfasi JPEG'e cevrilerek
+    # yeniden uretiliyordu. Metin katmani yok oluyor (arama/kopyalama
+    # calismıyor) ve dosya bozuluyordu. Ustelik gereksiz: ogrenciye
+    # gosterilen kitapcik zaten sayfa sayfa resme cevriliyor, dosya boyutu
+    # acilma hizini etkilemiyor. Orijinal artik oldugu gibi saklaniyor.
     return output_path
 
 

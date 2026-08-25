@@ -18,9 +18,20 @@ BOS_ISARETLERI = {"Boş", "boş", "BOŞ", "", None}
 
 
 def score_subject(user_answers, key_answers):
-    """Tek bir ders icin (liste, liste) -> dogru, yanlis, bos, net."""
+    """Tek bir ders icin (liste, liste) -> dogru, yanlis, bos, net.
+
+    ONEMLI - SESSIZ SORU KAYBI: Burada eskiden duz zip() kullaniliyordu.
+    zip(), listelerden KISA olani bitince durur ve hic ses cikarmaz. Yani
+    cevap anahtari 25 soru, ogrencinin formu 20 soru ise, kalan 5 soru
+    PUANLAMAYA HIC GIRMIYOR -- net "dogru" gorunuyor ama yanlis oluyordu.
+    Artik anahtar kac soruysa o kadar soru puanlanir; ogrencinin
+    isaretlemedigi (eksik kalan) sorular BOS sayilir ve durum "uyari"
+    alaninda bildirilir."""
+    user_answers = list(user_answers or [])
+    key_answers = list(key_answers or [])
     dogru = yanlis = bos = 0
-    for u, k in zip(user_answers, key_answers):
+    for i, k in enumerate(key_answers):
+        u = user_answers[i] if i < len(user_answers) else "Boş"
         if u in BOS_ISARETLERI:
             bos += 1
         elif u == k:
@@ -28,7 +39,13 @@ def score_subject(user_answers, key_answers):
         else:
             yanlis += 1
     net = round(dogru - yanlis / 3, 2)
-    return {"dogru": dogru, "yanlis": yanlis, "bos": bos, "net": net}
+    sonuc = {"dogru": dogru, "yanlis": yanlis, "bos": bos, "net": net}
+    if len(user_answers) != len(key_answers):
+        sonuc["uyari"] = (
+            f"Cevap sayısı uyuşmuyor: optik formda {len(user_answers)}, "
+            f"cevap anahtarında {len(key_answers)} soru var."
+        )
+    return sonuc
 
 
 def score_exam(user_answers, answer_key, structure):
@@ -74,7 +91,12 @@ def build_answer_detail(user_answers, answer_key, structure):
             # tutulur ve dokumde de o numaralar gosterilir; yoksa 1, 2, 3...
             numaralar = (meta or {}).get("numbers") or list(range(1, len(k_list) + 1))
             rows = []
-            for i, (u, k) in zip(numaralar, zip(u_list, k_list)):
+            # score_subject ile AYNI kural: anahtar kac soruysa o kadar satir
+            # uretilir; ogrencinin isaretlemedigi soru "Boş" sayilir. (Eskiden
+            # ic ice zip kullaniliyordu ve eksik cevap dokumden de dusuyordu.)
+            for _i, k in enumerate(k_list):
+                i = numaralar[_i] if _i < len(numaralar) else _i + 1
+                u = u_list[_i] if _i < len(u_list) else "Boş"
                 if u in BOS_ISARETLERI:
                     durum = "bos"
                 elif u == k:
