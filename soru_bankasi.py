@@ -32,7 +32,7 @@ import re
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-25.9"
+SURUM = "2026-08-26.3"
 
 DERS_ADLARI = [
     "Türkçe",
@@ -122,8 +122,15 @@ _TR_KATLA = str.maketrans(
 )
 
 
+_CID = re.compile(r"\(cid:\d+\)")
+
+
 def _sadece_harfler(s):
-    return re.sub(r"[^0-9A-Za-z]", "", (s or "").translate(_TR_KATLA)).upper()
+    # "(cid:248)" -- yazı tipinde karşılığı olmayan harfler pdfplumber'da
+    # böyle çıkıyor ("T.C. (cid:248)nk(cid:213)lap"). Temizlenmezse ders
+    # adı aramasında "CID248" diye sahte harfler oluşuyor.
+    s = _CID.sub("", s or "")
+    return re.sub(r"[^0-9A-Za-z]", "", s.translate(_TR_KATLA)).upper()
 
 
 def _altdizi_mi(kucuk, buyuk):
@@ -482,21 +489,26 @@ def _sayfayi_birak(page):
         pass
 
 
-def _sayfa_okumalari(doc, i, sol=14, sag=54, ust_yukseklik=60):
+def _sayfa_okumalari(doc, i, sol=14, sag=54, ust_yukseklik=60, sol_serit=True):
     """Bir sayfayı BİR KEZ açıp gereken bütün metinleri tek seferde okur.
 
     ÖNEMLİ - HIZ VE BELLEK: Tarama sırasında her sayfa için AYRI AYRI üç
     kez sayfa+metin nesnesi açılıyordu (tam metin, üst şerit, sol şerit).
     Yani 600 sayfalık bir kitapta 1800 açılış. Tek açılışa indirildi.
 
+    `sol_serit=False` verilirse sol şerit hiç okunmaz -- soru numarasına
+    ihtiyaç duymayan taramalarda (deneme bölümü) gereksiz iş yapılmaz.
+
     Döner: (tam_metin, ust_serit, sol_serit)"""
     page = doc[i]
     tp = page.get_textpage()
+    _sol_iste = sol_serit
     try:
         h, w = page.get_height(), page.get_width()
         tam = tp.get_text_bounded() or ""
         ust = tp.get_text_bounded(left=0, bottom=h - ust_yukseklik, right=w, top=h) or ""
-        sol_serit = tp.get_text_bounded(left=sol, bottom=0, right=sag, top=h) or ""
+        sol_serit = (tp.get_text_bounded(left=sol, bottom=0, right=sag, top=h) or ""
+                     ) if _sol_iste else ""
     except Exception:
         tam = ust = sol_serit = ""
     finally:
@@ -752,6 +764,9 @@ DERS_TAKMA_ADLARI = {
     "T.C. İnkılap Tarihi ve Atatürkçülük": [
         "T.C. İnkılap Tarihi ve Atatürkçülük", "İnkılap Tarihi ve Atatürkçülük",
         "TC İnkılap Tarihi", "İnkılap Tarihi", "İnkılâp Tarihi", "İnkılap", "İnkılâp",
+        # "İ" ve "ı" bu kitaplarda en sık bozulan harfler; "Atatürkçülük"
+        # ise bozulmadan okunuyor ve yalnızca bu dersin adında geçiyor.
+        "Atatürkçülük",
     ],
     "Din Kültürü ve Ahlak Bilgisi": [
         "Din Kültürü ve Ahlak Bilgisi", "Din Kültürü ve Ahlâk Bilgisi",
@@ -956,6 +971,21 @@ def _unite_adlari_sayfa(adlar, _sayfa):
             adaylar = [_meb_duzelt(satir), _bozuk_onar(satir),
                        _baslik_onar(satir), _kaydirmayi_coz(satir)]
             satirlar.append(adaylar)
+        # ÖNEMLİ - "İNKILAP'IN ÜNİTELERİNE DİN KÜLTÜRÜ'NÜN ADLARI
+        # YAZILIYOR" (2026-08-26): Sözel kitabının tek bir içindekiler
+        # sayfası var ve üç dersin ünitelerini arka arkaya sıralıyor:
+        #   1..6 (İnkılap) → 1..5 (Din Kültürü) → 1..10 (İngilizce)
+        # Ders başlıkları bozuk yazı tipiyle basıldığı için aradaki
+        # geçişler okunamıyor; sonuçta Din'in "Zekât ve Sadaka"sı
+        # İnkılap'ın 2. ünitesine yazılıyordu.
+        # Kural: ünite numarası GERİ GİDERSE (yeni bir 1'den başlarsa)
+        # yeni bir dersin listesi başlamıştır. O geçişte ders başlığı
+        # okunamadıysa, bundan sonraki adların hangi derse ait olduğu
+        # BİLİNMİYOR demektir; hiçbirine yazılmaz. Adsız ünite, yanlış
+        # adlı üniteden iyidir -- adı kullanıcı zaten tablodan yazıyor.
+        onceki_no = None
+        ders_yenilendi = True
+        belirsiz = False
         for k, adaylar in enumerate(satirlar):
             no, ad_adaylari = None, []
             for okunus in adaylar:
@@ -969,6 +999,10 @@ def _unite_adlari_sayfa(adlar, _sayfa):
                 for okunus in adaylar:
                     _d = _ders_bul_kesin(okunus)
                     if _d and len(_duz(okunus)) <= 60:
+                        if _d != su_ders:
+                            ders_yenilendi = True
+                            belirsiz = False
+                            onceki_no = None
                         su_ders = _d
                         if _d not in sayfa_dersleri:
                             sayfa_dersleri.append(_d)
@@ -976,10 +1010,23 @@ def _unite_adlari_sayfa(adlar, _sayfa):
                 continue
             if not (1 <= no <= 30):
                 continue
+            if onceki_no is not None and no <= onceki_no and not ders_yenilendi:
+                belirsiz = True
+            onceki_no = no
+            ders_yenilendi = False
+            if belirsiz:
+                continue
             if no in genel and (su_ders, no) in ders_adlari:
                 continue
             if not any(ad_adaylari) and k + 1 < len(satirlar):
-                ad_adaylari = [_ad_temizle(x) for x in satirlar[k + 1]]
+                # Sonraki satıra bak -- ama o satır KENDİSİ bir ünite
+                # satırıysa alma; yoksa adı okunamayan üniteye BİR
+                # SONRAKİ ünitenin adı yapışıyor ("2. Ünite · 3. Ünite
+                # Millî Bir Destan" gibi).
+                _sonraki = satirlar[k + 1]
+                if not any(_TOC_SATIRI.match(x) or _TOC_SATIRI_EN.match(x)
+                           for x in _sonraki):
+                    ad_adaylari = [_ad_temizle(x) for x in _sonraki]
             ad_adaylari = [a for a in ad_adaylari if a]
             if not ad_adaylari:
                 continue
@@ -999,6 +1046,22 @@ def _unite_adlari_sayfa(adlar, _sayfa):
     if len(sayfa_dersleri) == 1:
         for no, _ad in bu_sayfa:
             ders_adlari.setdefault((sayfa_dersleri[0], no), _ad)
+    # ÖNEMLİ - "İNGİLİZCE ÜNİTELERİNE İNKILAP'IN ADLARI YAZILIYOR"
+    # (2026-08-26): Sözel kitabının KAPAĞINDA üç ders de alt alta yazılı:
+    #   "T.C. İnkılap Tarihi ve Atatürkçülük / Din Kültürü ve Ahlak
+    #    Bilgisi / İngilizce"
+    # Ders takipçisi satır satır güncellendiği için kapak sayfasından
+    # sonra "şu an İngilizce bölümündeyiz" sanılıyordu. Hemen ardından
+    # gelen İÇİNDEKİLER sayfası (İnkılap'ın üniteleri) bu yüzden
+    # İngilizce'ye yazılıyor, İngilizce'nin 1. ünitesi "Bir Kahraman
+    # Doğuyor" oluyordu.
+    # Kural: bir sayfada BİRDEN FAZLA ders adı geçiyor ama HİÇ ünite
+    # satırı yoksa, o sayfa bir kapak / ders listesidir; bölüm başlığı
+    # değildir. Takipçi sıfırlanır. (Ünite satırları da içeren çok
+    # dersli içindekiler sayfaları bundan etkilenmez -- orada ders
+    # takibi satır satır zaten doğru çalışıyor.)
+    if len(sayfa_dersleri) >= 2 and not bu_sayfa:
+        su_ders = None
     adlar["_ders"] = su_ders
     return adlar
 
@@ -1348,6 +1411,226 @@ def _parcala(bolum, cevaplar, parca_soru):
     return [p for p in parcalar if p["numaralar"]]
 
 
+def _coklu_sutun_anahtari(page):
+    """YAN YANA SÜTUNLAR hâlinde basılmış cevap anahtarını okur.
+
+    NEDEN AYRI BİR OKUYUCU: Kitapların sonundaki "geçmiş yıllara ait
+    çıkmış sorular / deneme" bölümünde cevap anahtarı üç ders için
+    YAN YANA üç sütun hâlinde basılıyor:
+
+        T.C. İnkılap      Din Kültürü ve      Yabancı Dil
+        Tarihi ve         Ahlak Bilgisi       (İngilizce)
+        Atatürkçülük
+        1. A              1. D                1. D
+        2. C              2. B                2. B
+        ...               ...                 ...
+
+    PDF'ten düz metin olarak okunduğunda başlıklar ile sütunlar ayrı
+    ayrı ve KARIŞIK sırada geliyor (önce "Yabancı Dil", sonra "Din
+    Kültürü", en sonda "T.C. İnkılap"). Hangi sütunun hangi derse ait
+    olduğu bu hâliyle anlaşılamaz -- tahmin edilirse üç dersin cevapları
+    birbirine karışır. Bu yüzden burada kelimelerin SAYFADAKİ GERÇEK
+    KONUMU (x koordinatı) kullanılıyor: her cevap sütunu kendi x
+    şeridinde toplanıyor, her başlık kelimesi de en yakın sütuna
+    yazılıyor.
+
+    Döner: soldan sağa [(ders, {soru_no: harf}), ...] ya da None.
+    EMİN OLUNAMAYAN HER DURUMDA None döner -- yanlış anahtar, anahtarsız
+    testten çok daha kötüdür."""
+    try:
+        kelimeler = page.extract_words(use_text_flow=False,
+                                       keep_blank_chars=False)
+    except Exception:
+        return None
+    if not kelimeler:
+        return None
+
+    # 1) "12." + "B" ikililerini topla (aynı satırda, yan yana)
+    ikili = []
+    for a, b in zip(kelimeler, kelimeler[1:]):
+        if abs(a["top"] - b["top"]) > 3:
+            continue
+        m = re.fullmatch(r"(\d{1,3})[\.\)]", a["text"])
+        if not m or not re.fullmatch(r"[A-E]", b["text"]):
+            continue
+        if not (0 <= b["x0"] - a["x1"] <= 25):
+            continue
+        ikili.append((int(m.group(1)), b["text"], b["x0"], b["top"]))
+    if len(ikili) < 12:
+        return None
+
+    # 2) Sütunlara ayır. Şerit anahtarı olarak HARFİN x'i kullanılıyor:
+    #    numaralar sağa dayalı basıldığı için "1." ile "10." farklı
+    #    x0'dan başlar, harf ise her satırda tam aynı yerdedir.
+    sutunlar = []
+    for no, harf, x0, ust in sorted(ikili, key=lambda t: (t[2], t[3])):
+        for s in sutunlar:
+            if abs(s["x"] - x0) <= 10:
+                s["cevaplar"][no] = harf
+                s["ust"] = min(s["ust"], ust)
+                break
+        else:
+            sutunlar.append({"x": x0, "cevaplar": {no: harf}, "ust": ust})
+    sutunlar = [s for s in sutunlar if len(s["cevaplar"]) >= 5]
+    if len(sutunlar) < 2:
+        return None
+    sutunlar.sort(key=lambda s: s["x"])
+
+    # 3) Başlık kelimeleri: cevapların ÜSTÜNDE kalanlar. Sayfanın kendi
+    #    başlığı ("SÖZEL BÖLÜM / CEVAP ANAHTARI") ders adı değildir,
+    #    onun altından itibaren bakılır.
+    ilk_ust = min(s["ust"] for s in sutunlar)
+    _sayfa_basligi = {"CEVAP", "ANAHTARI", "ANSWER", "KEY", "SOZEL",
+                      "BOLUM", "TEST", "DENEME"}
+    _alt_sinir = 0.0
+    for k in kelimeler:
+        if k["top"] < ilk_ust and _sadece_harfler(k["text"]) in _sayfa_basligi:
+            _alt_sinir = max(_alt_sinir, k["top"] + 1)
+    basliklar = [k for k in kelimeler
+                 if _alt_sinir < k["top"] < ilk_ust - 3]
+    if not basliklar:
+        return None
+    for k in basliklar:
+        orta = (k["x0"] + k["x1"]) / 2.0
+        en_yakin = min(sutunlar, key=lambda s: abs(s["x"] - orta))
+        en_yakin.setdefault("baslik", []).append(k)
+
+    # 4) Her sütunun ders adını çöz. Biri bile çözülemezse ya da iki
+    #    sütun aynı derse düşerse okuma güvenilmez sayılır.
+    sonuc = []
+    for s in sutunlar:
+        # Kelimeleri önce SATIRLARA topla: aynı satırdaki kelimelerin
+        # "top" değeri harf yüksekliğine göre 1-2 punto oynayabiliyor
+        # ("T.C. İnkılap" ikilisinde İ harfi yüzünden). Doğrudan top'a
+        # göre sıralanırsa "İnkılap T.C. Tarihi" gibi bozuk bir metin
+        # çıkıyor ve ders adı tanınmıyor.
+        satirlar = []
+        for w in sorted(s.get("baslik") or [], key=lambda w: w["top"]):
+            if satirlar and abs(satirlar[-1][0] - w["top"]) <= 6:
+                satirlar[-1][1].append(w)
+            else:
+                satirlar.append((w["top"], [w]))
+        metin = " ".join(
+            " ".join(x["text"] for x in sorted(grup, key=lambda x: x["x0"]))
+            for _t, grup in satirlar)
+        ders = _ders_bul_kesin(metin)
+        if not ders:
+            return None
+        sonuc.append((ders, s["cevaplar"]))
+    if len({d for d, _ in sonuc}) != len(sonuc):
+        return None
+    return sonuc
+
+
+def deneme_bolumunu_coz(pdf_path, ilerleme=None):
+    """Kitabın sonundaki "geçmiş yıllara ait çıkmış sorular / deneme"
+    bölümünü çözer.
+
+    ÖLÇÜLDÜ (kullanıcının sözel kitabı, 448 sayfa): 345-448 arası
+    sayfalarda 7 tam deneme var -- her birinde İnkılap 10 + Din Kültürü
+    10 + İngilizce 10 soru, ardından üç sütunlu ortak cevap anahtarı.
+    Ünite okuyucusu bu sayfaları hiç alamıyordu: soru numaraları sayfa
+    kenarından eksik okunuyor ve anahtar sayfasında "N. Ünite" başlığı
+    bulunmuyor. Burada numara aramak yerine ANAHTARDAKİ SORU SAYISI
+    esas alınıyor (anahtarda 10 cevap varsa test 10 soruluktur).
+
+    Döner: (testler, uyarilar). Bulunamazsa ([], []).
+    """
+    import pypdfium2 as pdfium
+
+    testler, uyarilar = [], []
+    doc = pdfium.PdfDocument(pdf_path)
+    try:
+        toplam = len(doc)
+        sayfa_dersi = {}          # sayfa -> ders (bölüm ayracı görülen sayfalar)
+        anahtar_sayfalari = []    # her türlü cevap anahtarı sayfası
+        adaylar = []              # ünite başlığı taşımayan anahtar sayfaları
+        for i in range(toplam):
+            if ilerleme is not None and (i % 10 == 0 or i == toplam - 1):
+                try:
+                    ilerleme(i + 1, toplam)
+                except Exception:
+                    pass
+            metin, _ust, _sol = _sayfa_okumalari(doc, i, sol_serit=False)
+            harfler = _sadece_harfler(metin)
+            harfler_k = _sadece_harfler(_kaydirmayi_coz(metin))
+            if ("CEVAPANAHTARI" in harfler or "CEVAPANAHTARI" in harfler_k
+                    or "ANSWERKEY" in harfler or "ANSWERKEY" in harfler_k
+                    or _anahtar_sayfasi_mi(metin)):
+                anahtar_sayfalari.append(i + 1)
+                if not _anahtar_bloklari(metin):
+                    adaylar.append(i + 1)
+                continue
+            d = _sayfa_dersi_metinden(_duz(metin), _ust)
+            if d:
+                sayfa_dersi[i + 1] = d
+    finally:
+        doc.close()
+
+    if not adaylar:
+        return [], []
+
+    sira = 0
+    with pdfplumber.open(pdf_path) as pdf:
+        for sf in adaylar:
+            if sf > len(pdf.pages):
+                continue
+            page = pdf.pages[sf - 1]
+            sutunlar = _coklu_sutun_anahtari(page)
+            try:
+                page.flush_cache()
+            except Exception:
+                pass
+            if not sutunlar:
+                continue
+            onceki = max([p for p in anahtar_sayfalari if p < sf], default=0)
+            bolge = list(range(onceki + 1, sf))
+            if not bolge:
+                continue
+            # Bölgedeki ders ayraçlarını sırayla topla
+            gruplar = []
+            for p in bolge:
+                d = sayfa_dersi.get(p)
+                if not d or (gruplar and gruplar[-1][0] == d):
+                    continue
+                gruplar.append((d, p))
+            if len(gruplar) < len(sutunlar):
+                uyarilar.append(
+                    f"Sayfa {sf}: deneme cevap anahtarı okundu "
+                    f"({len(sutunlar)} ders) ama soru sayfaları ayrılamadı, "
+                    f"bu deneme atlandı.")
+                continue
+            araliklar = {}
+            for k, (d, p) in enumerate(gruplar):
+                son = gruplar[k + 1][1] - 1 if k + 1 < len(gruplar) else bolge[-1]
+                araliklar.setdefault(d, list(range(p, son + 1)))
+            sira += 1
+            _eksik = []
+            for ders, cevaplar in sutunlar:
+                sayfalar = araliklar.get(ders)
+                if not sayfalar:
+                    _eksik.append(ders)
+                    continue
+                nolar = sorted(cevaplar)
+                testler.append({
+                    "ders": ders,
+                    "test_no": 900 + sira,
+                    "konu": f"Deneme {sira} · Çıkmış Sorular",
+                    "sayfalar": sayfalar,
+                    "numaralar": nolar,
+                    "cevaplar": {n: cevaplar[n] for n in nolar},
+                    "soru_sayisi": len(nolar),
+                    "anahtar_soru_sayisi": len(nolar),
+                    "unite_no": 900 + sira,
+                    "tur": "unite",
+                })
+            if _eksik:
+                uyarilar.append(
+                    f"Deneme {sira}: {', '.join(_eksik)} soru sayfaları "
+                    f"bulunamadı, o ders(ler) atlandı.")
+    return testler, uyarilar
+
+
 def unite_kitabini_coz(pdf_path, parca_soru=0, ilerleme=None, merkezi_atla=False):
     """'Ünite / Tema' düzenindeki bir çalışma kitabını ayrıştırır.
 
@@ -1644,6 +1927,20 @@ def testleri_bul(pdf_path, parca_soru=0, ilerleme=None, merkezi_atla=False):
     except Exception as e:
         unite_testler, unite_uyari = [], []
         hatalar.append(f"Ünite düzeni okunamadı: {e}")
+    # KİTABIN SONUNDAKİ DENEME BÖLÜMÜ: Ünite okuyucusunun alamadığı,
+    # üç dersin cevap anahtarının yan yana basıldığı "geçmiş yıllara ait
+    # çıkmış sorular" kısmı ayrı bir okuyucuyla çözülür ve listeye
+    # eklenir. Bulunamazsa hiçbir şey değişmez.
+    try:
+        _dnm, _dnm_uyari = deneme_bolumunu_coz(pdf_path, ilerleme=ilerleme)
+    except Exception as e:
+        _dnm, _dnm_uyari = [], []
+        hatalar.append(f"Deneme bölümü okunamadı: {e}")
+    if _dnm:
+        _var = {(t["ders"], t["test_no"]) for t in unite_testler}
+        unite_testler = unite_testler + [
+            t for t in _dnm if (t["ders"], t["test_no"]) not in _var]
+    unite_uyari = list(unite_uyari) + list(_dnm_uyari)
     # Ünite düzeni tuttuysa ikinci okuyucuyu hiç çalıştırma (zaman kazancı)
     if [t for t in unite_testler if t.get("cevaplar") and t.get("numaralar")]:
         anahtar = {}
