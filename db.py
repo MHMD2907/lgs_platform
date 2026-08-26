@@ -22,7 +22,7 @@ from datetime import datetime
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lgs_platform.db")
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-26.8"
+SURUM = "2026-08-26.9"
 
 DEFAULT_CATEGORIES = [
     "8. Sınıf (LGS)",
@@ -904,6 +904,47 @@ def add_category(name):
     conn.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (name,))
     conn.commit()
     conn.close()
+
+
+@_yazma
+def delete_category(name):
+    """Bir BÖLÜM (kategori) adını siler.
+
+    NEDEN GEREKLİ: Yanlış adla eklenen testler silinince bölüm adı
+    listede kalmaya devam ediyordu ("Ünite Testleri - English" gibi).
+    Kullanıcı onu bir daha kaldıramıyordu. Artık İÇİ BOŞ bölümler
+    silinebiliyor; içinde deneme varsa silinmiyor (yanlışlıkla veri
+    kaybı olmasın)."""
+    if not name:
+        return False, "Bölüm adı boş."
+    conn = get_conn()
+    try:
+        _adet = conn.execute(
+            "SELECT COUNT(*) AS n FROM exams WHERE category = ?", (name,)
+        ).fetchone()["n"]
+        if _adet:
+            return False, (f"'{name}' bölümünde {_adet} deneme var. "
+                           f"Önce onları silin.")
+        conn.execute("DELETE FROM categories WHERE name = ?", (name,))
+        conn.commit()
+    finally:
+        conn.close()
+    return True, f"'{name}' bölümü silindi."
+
+
+def bos_kategoriler():
+    """İçinde hiç deneme kalmamış, sonradan eklenmiş bölüm adları.
+    Hazır bölümler (8. Sınıf LGS vb.) listeye alınmaz."""
+    conn = get_conn()
+    try:
+        _tum = [r["name"] for r in
+                conn.execute("SELECT name FROM categories").fetchall()]
+        _dolu = {r["category"] for r in
+                 conn.execute("SELECT DISTINCT category FROM exams").fetchall()}
+    finally:
+        conn.close()
+    return sorted(a for a in _tum
+                  if a not in _dolu and a not in DEFAULT_CATEGORIES)
 
 
 # ---------- exams ----------

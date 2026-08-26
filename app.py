@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-26.8"
+SURUM = "2026-08-26.9"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -4218,6 +4218,37 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                 st.info("Henüz kayıtlı deneme yok.")
             else:
                 st.caption(f"Toplam **{len(all_exams)}** kayıtlı deneme/test var.")
+
+            # ---- Boş bölüm adlarını temizle ---------------------------
+            # KULLANICI GERİ BİLDİRİMİ: "sildiğim testlerin adları hâlâ
+            # duruyor". Silinen testlerin BÖLÜM adı listede kalmaya devam
+            # ediyordu ve kaldırmanın hiçbir yolu yoktu.
+            _bos_kats = db.bos_kategoriler()
+            if _bos_kats:
+                with st.expander(
+                        f"🧹 İçi boş bölüm adları ({len(_bos_kats)}) — temizleyin"):
+                    st.caption(
+                        "Bu bölümlerde hiç deneme kalmamış ama adları "
+                        "listelerde görünmeye devam ediyor. Silmek "
+                        "hiçbir denemeyi etkilemez."
+                    )
+                    for _bk in _bos_kats:
+                        _c1, _c2 = st.columns([4, 1])
+                        _c1.write(f"• {_bk}")
+                        if _c2.button("Sil", key=f"_katsil_{slugify(_bk)}"):
+                            _ok, _msg = db.delete_category(_bk)
+                            st.session_state["_admin_flash"] = (
+                                "success" if _ok else "error",
+                                ("🧹 " if _ok else "") + _msg)
+                            st.rerun()
+                    if len(_bos_kats) > 1 and st.button(
+                            f"🧹 {len(_bos_kats)} boş bölümün hepsini sil",
+                            key="_katsil_hepsi"):
+                        _n = sum(1 for _bk in _bos_kats
+                                 if db.delete_category(_bk)[0])
+                        st.session_state["_admin_flash"] = (
+                            "success", f"🧹 {_n} boş bölüm adı silindi.")
+                        st.rerun()
 
             # ---- Süzgeç + toplu silme --------------------------------
             # KULLANICI İSTEĞİ: "yanlış eklenenleri vb daha kolay silmek
