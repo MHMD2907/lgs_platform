@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-26.5"
+SURUM = "2026-08-26.8"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -1293,17 +1293,29 @@ def _optik_form(exam_id, attempt_no, student_name, aktif_yapi, aktif_anahtar,
                 options = _dersin_sikleri(section, subject)
                 _bos_index = options.index("Boş")
                 saved_subject = saved.get(section, {}).get(subject, [])
-                if numaralar and numaralar[0] != 1:
+                # ÖNEMLİ - "SORU NUMARASI GÖRÜNMÜYOR, YA KAYARSA?":
+                # Numara satırın sonunda, ders adının arkasında kalıyordu
+                # ("İngilizce - Soru 7"). Tablette hızlı işaretlerken göz
+                # numarayı değil ders adını görüyor. Artık numara satırın
+                # BAŞINDA ve kalın; ayrıca her bölümün üstünde kitapçıktaki
+                # numara aralığı yazıyor ki kayma ihtimali gözle görülsün.
+                if numaralar:
+                    _aralik = (f"{numaralar[0]}" if len(numaralar) == 1
+                               else f"{numaralar[0]} – {numaralar[-1]}")
+                    _bas = ("ℹ️ Bu testin soruları kitapçıkta "
+                            f"**{numaralar[0]}. sorudan** başlıyor. "
+                            if numaralar[0] != 1 else "")
                     st.caption(
-                        f"ℹ️ Bu testin soruları kitapçıkta **{numaralar[0]}. sorudan** "
-                        f"başlıyor; aşağıdaki numaralar PDF'tekilerle birebir aynıdır."
+                        f"{_bas}Aşağıdaki numaralar **kitapçıktakilerle birebir "
+                        f"aynıdır** ({_aralik}). PDF'te gördüğünüz numarayı "
+                        f"formda da arayın."
                     )
                 answers = []
                 for _sira, _soru_no in enumerate(numaralar):
                     prev = saved_subject[_sira] if _sira < len(saved_subject) else "Boş"
                     default_index = options.index(prev) if prev in options else _bos_index
                     ans = st.radio(
-                        f"{subject} - Soru {_soru_no}",
+                        f"**{_soru_no}.** soru",
                         options,
                         index=default_index,
                         horizontal=True,
@@ -3070,13 +3082,30 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         _ad = t["konu"] if t.get("tur") == "unite" else f"Test {t['test_no']} · {t['konu']}"
                         return f"{_ad} ({_ek})"
 
+                    # Tarama kimliği: hangi KİTABIN sonucuna bakıyoruz.
+                    # Kutu anahtarlarına ekleniyor ki bir kitaptan kalan
+                    # değerler bir sonraki kitaba taşınmasın.
+                    _tarama_kimlik = slugify(os.path.basename(
+                        str(st.session_state.get(qb_path_state) or "kitap")))[:24]
                     _unite_mi = any(t.get("tur") == "unite" for t in _bu_ders)
                     _varsayilan_kat = (
                         f"Ünite Testleri - {_secili_ders}" if _unite_mi
                         else f"Soru Bankası - {_secili_ders}"
                     )
+                    # ÖNEMLİ - "TÜRKÇE KİTABI 'İNGİLİZCE' BÖLÜMÜNE KAYDEDİLDİ":
+                    # Bu kutunun anahtarı sabit ("qb_kategori") idi. Streamlit'te
+                    # bir kutunun anahtarı sabit kalırsa, `value=` ile verilen
+                    # YENİ varsayılan YOK SAYILIR; kutu bir önceki değerini
+                    # korur. Sonuç: Din Kültürü'nü ekledikten sonra derse
+                    # İngilizce'ye geçince kutuda hâlâ eski bölüm adı duruyor,
+                    # hatta BAŞKA BİR KİTABI taradığınızda bile duruyordu.
+                    # Kullanıcının gördüğü tam olarak buydu: Türkçe kitabının
+                    # testleri "Ünite Testleri - İngilizce" bölümüne düştü.
+                    # Artık her dersin kendi kutusu var; ders değişince
+                    # varsayılan bölüm adı da değişiyor.
                     _kategori_adi = st.text_input(
-                        "Hangi bölüme eklensin?", value=_varsayilan_kat, key="qb_kategori",
+                        "Hangi bölüme eklensin?", value=_varsayilan_kat,
+                        key=f"qb_kategori_{_tarama_kimlik}_{slugify(_secili_ders)}",
                         help="Öğrenci 'Sınav Çöz' ekranında bu adı görecek.",
                     )
                     # KULLANICI GERİ BİLDİRİMİ ("ekledim ama veriler ekranda
@@ -3133,7 +3162,7 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     if _duzenleyici and _tablo_satirlari:
                         _duzenlenmis = _duzenleyici(
                             pd.DataFrame(_tablo_satirlari),
-                            key=f"qb_duzen_{_secili_ders}_{len(_kalan)}",
+                            key=f"qb_duzen_{_tarama_kimlik}_{_secili_ders}_{len(_kalan)}",
                             use_container_width=True,
                             hide_index=True,
                             disabled=["Soru", "Sayfa"],
@@ -3161,7 +3190,7 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                         _secilenler = st.multiselect(
                             "Eklenecek testler", _kalan, default=_kalan,
                             format_func=_qb_etiket,
-                            key=f"qb_secim_{_secili_ders}_{len(_kalan)}",
+                            key=f"qb_secim_{_tarama_kimlik}_{_secili_ders}_{len(_kalan)}",
                         )
                         _adlar = {}
                     st.caption(
@@ -4363,10 +4392,21 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                 st.info("Henüz kayıtlı öğrenci yok.")
             else:
                 for s in students:
-                    with st.expander(f"👤 {s['display_name']}  (kullanıcı adı: {s['username']})"):
+                    # YAZILDIĞI HÂLİ GÖSTER: Giriş anahtarı küçük harfli
+                    # ("e.m.onur") ama yönetici "E.M.ONUR" yazdıysa ekranda
+                    # öyle görünmeli. Çocuk hangi yazımla girerse girsin
+                    # (büyük/küçük harf, İ/I/ı/i) aynı hesaba düşer.
+                    _gorunen_kadi = s.get("username_yazim") or s["username"]
+                    with st.expander(f"👤 {s['display_name']}  (kullanıcı adı: {_gorunen_kadi})"):
                         st.markdown("**Kullanıcı adını değiştir**")
+                        st.caption(
+                            "Yazdığınız gibi görünür. Girişte büyük/küçük harf "
+                            "farkı aranmaz — çocuk hangi şekilde yazarsa yazsın "
+                            "aynı hesaba girer."
+                        )
                         new_username = st.text_input(
-                            "Yeni kullanıcı adı", value=s["username"], key=f"newuser_{s['username']}"
+                            "Yeni kullanıcı adı", value=_gorunen_kadi,
+                            key=f"newuser_{s['username']}"
                         )
                         if st.button("Kullanıcı Adını Güncelle", key=f"renamebtn_{s['username']}"):
                             # ÖNEMLİ - "DEĞİŞTİRDİM AMA KAYDEDİLDİĞİNE DAİR HİÇBİR
@@ -4380,22 +4420,32 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                             _eski = s["username"]
                             ok, msg = db.rename_student(_eski, new_username)
                             if ok:
-                                _yeni_ad = (new_username or "").strip().lower().replace(" ", "_")
+                                _yeni_ad = db.kullanici_adi_duzelt(new_username)
+                                _yeni_yazim = (new_username or "").strip().replace(" ", "_")
                                 # Değiştirilen öğrenci o an oturumda seçiliyse
                                 # oturumu da yeni ada taşı, yoksa raporlar boş görünür.
                                 if st.session_state.student_name == _eski:
                                     st.session_state.student_name = _yeni_ad
-                                if _yeni_ad == _eski:
+                                if _yeni_ad == _eski and _yeni_yazim == _gorunen_kadi:
                                     st.session_state["_admin_flash"] = (
                                         "success",
-                                        f"ℹ️ Kullanıcı adı zaten **{_eski}** idi; "
+                                        f"ℹ️ Kullanıcı adı zaten **{_gorunen_kadi}** idi; "
                                         f"değişiklik yapılmadı.",
+                                    )
+                                elif _yeni_ad == _eski:
+                                    # Sadece BÜYÜK/küçük harf yazımı değişti.
+                                    st.session_state["_admin_flash"] = (
+                                        "success",
+                                        f"✅ Kullanıcı adı artık **{_yeni_yazim}** diye "
+                                        f"görünecek ({s['display_name']}). Giriş yine "
+                                        f"aynı hesaba yapılır; büyük/küçük harf farkı "
+                                        f"aranmaz.",
                                     )
                                 else:
                                     st.session_state["_admin_flash"] = (
                                         "success",
-                                        f"✅ Kullanıcı adı güncellendi: **{_eski} → "
-                                        f"{_yeni_ad}** ({s['display_name']}). Geçmiş "
+                                        f"✅ Kullanıcı adı güncellendi: **{_gorunen_kadi} → "
+                                        f"{_yeni_yazim}** ({s['display_name']}). Geçmiş "
                                         f"sonuçları ve yarım kalan sınavı da yeni ada "
                                         f"taşındı.",
                                     )

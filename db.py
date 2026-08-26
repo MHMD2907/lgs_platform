@@ -22,7 +22,7 @@ from datetime import datetime
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lgs_platform.db")
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-26.5"
+SURUM = "2026-08-26.8"
 
 DEFAULT_CATEGORIES = [
     "8. Sınıf (LGS)",
@@ -456,6 +456,16 @@ def init_db():
         c.execute("ALTER TABLE exams ADD COLUMN source_url TEXT")
     except Exception:
         pass  # sütun zaten var
+    # KULLANICI ADININ YAZILDIĞI HÂLİ: "username" giriş anahtarıdır ve
+    # küçük harfe indirgenir (bkz. kullanici_adi_duzelt). Ama yönetici
+    # "E.M.ONUR" yazınca ekranda "e.m.onur" görmek istemiyor. Yazıldığı
+    # hâl burada ayrıca saklanıp SADECE gösterimde kullanılıyor; giriş,
+    # sonuçlar ve tüm sorgular eskisi gibi küçük harfli anahtarla çalışır.
+    for _t in ("students", "admins"):
+        try:
+            c.execute(f"ALTER TABLE {_t} ADD COLUMN username_yazim TEXT")
+        except Exception:
+            pass  # sütun zaten var
 
     conn.commit()
 
@@ -568,6 +578,7 @@ def _hash_password(password, salt=None):
 
 @_yazma
 def create_student(username, display_name, password):
+    _yazim = (username or "").strip().replace(" ", "_")
     username = kullanici_adi_duzelt(username)
     display_name = (display_name or "").strip()
     if not username or not display_name or not password:
@@ -591,9 +602,11 @@ def create_student(username, display_name, password):
         )
     salt, pw_hash = _hash_password(password)
     conn.execute(
-        """INSERT INTO students (username, display_name, salt, password_hash, created_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (username, display_name, salt, pw_hash, datetime.now().isoformat(timespec="seconds")),
+        """INSERT INTO students (username, username_yazim, display_name,
+                                salt, password_hash, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (username, _yazim, display_name, salt, pw_hash,
+         datetime.now().isoformat(timespec="seconds")),
     )
     conn.commit()
     conn.close()
@@ -657,6 +670,9 @@ def change_admin_password(username, current_password, new_password):
 def rename_student(old_username, new_username):
     """Bir öğrencinin kullanıcı adını değiştirir (görünen ad aynı kalır).
     Sonuç geçmişi de (results.student_name) otomatik olarak yeni ada taşınır."""
+    # Yönetici "E.M.ONUR" yazdıysa ekranda öyle görünsün: yazıldığı hâl
+    # ayrıca saklanıyor. Giriş anahtarı yine küçük harfli olan.
+    _yazim = (new_username or "").strip().replace(" ", "_")
     old_username = kullanici_adi_duzelt(old_username)
     new_username = kullanici_adi_duzelt(new_username)
     if not new_username:
@@ -671,7 +687,14 @@ def rename_student(old_username, new_username):
         if exists_new:
             conn.close()
             return False, "Bu kullanıcı adı zaten başka bir öğrenci tarafından kullanılıyor."
-    conn.execute("UPDATE students SET username = ? WHERE username = ?", (new_username, old_username))
+    try:
+        conn.execute(
+            "UPDATE students SET username = ?, username_yazim = ? WHERE username = ?",
+            (new_username, _yazim, old_username))
+    except Exception:
+        # Sütun henüz yoksa (çok eski veritabanı) eski davranış sürsün.
+        conn.execute("UPDATE students SET username = ? WHERE username = ?",
+                     (new_username, old_username))
     conn.execute("UPDATE results SET student_name = ? WHERE student_name = ?", (new_username, old_username))
     # ONEMLI - CEVAP KAYBI: Burada eskiden SADECE students ve results
     # guncelleniyordu. Ogrencinin YARIM KALMIS sinavi in_progress
@@ -731,7 +754,8 @@ def get_students():
     """Kayıtlı tüm öğrencileri (kullanıcı adı + görünen ad) döner -- admin panelinde listelemek için."""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT username, display_name, created_at FROM students ORDER BY display_name"
+        "SELECT username, username_yazim, display_name, created_at "
+        "FROM students ORDER BY display_name"
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
