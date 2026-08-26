@@ -22,7 +22,7 @@ from datetime import datetime
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lgs_platform.db")
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-26.3"
+SURUM = "2026-08-26.5"
 
 DEFAULT_CATEGORIES = [
     "8. Sınıf (LGS)",
@@ -470,8 +470,93 @@ def init_db():
     conn.commit()
     conn.close()
 
+    # Eski kurulumlarda bozuk yazımla ("EMİR" -> "emi̇r") kaydedilmiş
+    # kullanıcı adlarını yeni standarda taşı. Düzeltilecek bir şey yoksa
+    # hiçbir maliyeti yok.
+    try:
+        kullanici_adlarini_duzelt()
+    except Exception:
+        pass
+
 
 # ---------- students (şifreli öğrenci hesapları) ----------
+
+# Kullanıcı adında İ/I/ı/i harflerinin hepsi "i" sayılır.
+_KADI_KATLA = str.maketrans({"İ": "i", "I": "i", "ı": "i", "i": "i"})
+
+
+def kullanici_adi_duzelt(s):
+    """Kullanıcı adını TEK BİR standart yazıma indirger.
+
+    NEDEN: Kullanıcı adı GİRİŞ ANAHTARIDIR; çocuk tablette büyük/küçük
+    harfe dikkat etmek zorunda kalmasın diye küçük harfe çevriliyor.
+
+    ÖNEMLİ - TÜRKÇE "İ" TUZAĞI: Python'da "EMİR".lower() sonucu "emir"
+    DEĞİLDİR; noktalı İ küçültülünce "i" + görünmez bir "nokta" işareti
+    olur (5 harflik bir metin). Yani yönetici "EMİR" yazıp kaydediyor,
+    çocuk "emir" yazıp giriş yapmaya çalışıyor ve "kullanıcı bulunamadı"
+    diyordu. Artık İ, I, ı, i harflerinin dördü de düz "i" sayılıyor;
+    hangisini yazarsanız yazın aynı hesaba düşüyor.
+
+    NOT: Ekranda görünen ad (Ad Soyad) bundan ETKİLENMEZ; o, yazdığınız
+    gibi büyük harfleriyle saklanır."""
+    s = (s or "").strip().translate(_KADI_KATLA).lower().replace(" ", "_")
+    # "İ".lower() geriye görünmez bir "üstte nokta" işareti (U+0307)
+    # bırakır. Ekranda hiçbir şey görünmez ama metin eşleşmez; temizlenir.
+    return s.replace("̇", "")
+
+
+@_yazma
+def kullanici_adlarini_duzelt():
+    """Eski kurulumlarda bozuk yazımla kaydedilmiş kullanıcı adlarını
+    yeni standarda taşır (bkz. kullanici_adi_duzelt). Bir kez çalışır,
+    düzeltilecek bir şey yoksa hiçbir şey yapmaz."""
+    conn = get_conn()
+    tasinan = 0
+    try:
+        for tablo in ("students", "admins"):
+            try:
+                satirlar = conn.execute(
+                    f"SELECT username FROM {tablo}").fetchall()
+            except Exception:
+                continue
+            mevcut = {s["username"] for s in satirlar}
+            for s in satirlar:
+                eski = s["username"]
+                yeni = kullanici_adi_duzelt(eski)
+                if yeni == eski or not yeni or yeni in mevcut:
+                    continue
+                conn.execute(f"UPDATE {tablo} SET username = ? WHERE username = ?",
+                             (yeni, eski))
+                mevcut.discard(eski)
+                mevcut.add(yeni)
+                tasinan += 1
+                if tablo != "students":
+                    continue
+                for _t, _s in (("results", "student_name"),
+                               ("in_progress", "student_name")):
+                    try:
+                        conn.execute(f"UPDATE {_t} SET {_s} = ? WHERE {_s} = ?",
+                                     (yeni, eski))
+                    except Exception:
+                        pass
+                try:
+                    for _a in conn.execute(
+                            "SELECT key FROM settings WHERE key LIKE ?",
+                            ("wrongmode:%",)).fetchall():
+                        if f":{eski}:" in _a["key"]:
+                            _yeni_a = _a["key"].replace(f":{eski}:", f":{yeni}:", 1)
+                            conn.execute("DELETE FROM settings WHERE key = ?",
+                                         (_yeni_a,))
+                            conn.execute("UPDATE settings SET key = ? WHERE key = ?",
+                                         (_yeni_a, _a["key"]))
+                except Exception:
+                    pass
+        conn.commit()
+    finally:
+        conn.close()
+    return tasinan
+
 
 def _hash_password(password, salt=None):
     """Şifreyi salt + sha256 ile hash'ler. Düz metin asla saklanmaz."""
@@ -483,7 +568,7 @@ def _hash_password(password, salt=None):
 
 @_yazma
 def create_student(username, display_name, password):
-    username = (username or "").strip().lower().replace(" ", "_")
+    username = kullanici_adi_duzelt(username)
     display_name = (display_name or "").strip()
     if not username or not display_name or not password:
         return False, "Kullanıcı adı, ad soyad ve şifre boş olamaz."
@@ -520,7 +605,7 @@ def ensure_default_admin(username, display_name, password):
     """Admins tablosu boşsa, config.py'deki başlangıç bilgileriyle ilk yönetici
     hesabını oluşturur. Var olan bir yönetici hesabına ASLA dokunmaz -- yani
     admin panelinden şifre değiştirildikten sonra bu fonksiyon onu geri almaz."""
-    username = (username or "admin").strip().lower().replace(" ", "_")
+    username = kullanici_adi_duzelt(username or "admin")
     conn = get_conn()
     exists = conn.execute("SELECT 1 FROM admins WHERE username = ?", (username,)).fetchone()
     if not exists:
@@ -535,7 +620,7 @@ def ensure_default_admin(username, display_name, password):
 
 
 def verify_admin(username, password):
-    username = (username or "").strip().lower().replace(" ", "_")
+    username = kullanici_adi_duzelt(username)
     if not username or not password:
         return None
     conn = get_conn()
@@ -572,8 +657,8 @@ def change_admin_password(username, current_password, new_password):
 def rename_student(old_username, new_username):
     """Bir öğrencinin kullanıcı adını değiştirir (görünen ad aynı kalır).
     Sonuç geçmişi de (results.student_name) otomatik olarak yeni ada taşınır."""
-    old_username = (old_username or "").strip().lower().replace(" ", "_")
-    new_username = (new_username or "").strip().lower().replace(" ", "_")
+    old_username = kullanici_adi_duzelt(old_username)
+    new_username = kullanici_adi_duzelt(new_username)
     if not new_username:
         return False, "Yeni kullanıcı adı boş olamaz."
     conn = get_conn()
@@ -624,7 +709,7 @@ def change_admin_username(current_username, current_password, new_username):
     admin = verify_admin(current_username, current_password)
     if not admin:
         return False, "Mevcut şifre yanlış."
-    new_username = (new_username or "").strip().lower().replace(" ", "_")
+    new_username = kullanici_adi_duzelt(new_username)
     if not new_username:
         return False, "Yeni kullanıcı adı boş olamaz."
     conn = get_conn()
@@ -659,7 +744,7 @@ def delete_student(username, sonuclari_da_sil=True):
     sonuclari_da_sil=True ise o ogrencinin cozdugu sinav sonuclari ve yarim
     kalmis ilerlemesi de silinir. False ise sonuclar veritabaninda kalir
     (hesap gider ama gecmis raporlar korunur)."""
-    username = (username or "").strip().lower().replace(" ", "_")
+    username = kullanici_adi_duzelt(username)
     if not username:
         return False, "Kullanıcı adı boş olamaz."
     conn = get_conn()
@@ -730,7 +815,7 @@ def genel_istatistikler():
 @_yazma
 def reset_student_password(username, new_password):
     """Admin tarafından bir öğrencinin şifresini sıfırlar (öğrenci unutursa)."""
-    username = (username or "").strip().lower().replace(" ", "_")
+    username = kullanici_adi_duzelt(username)
     if not username or not new_password:
         return False, "Kullanıcı adı ve yeni şifre boş olamaz."
     if len(new_password) < 4:
@@ -754,7 +839,7 @@ def reset_student_password(username, new_password):
 
 def verify_student(username, password):
     """Kullanıcı adı + şifre doğruysa öğrenci kaydını (dict) döner, değilse None."""
-    username = (username or "").strip().lower().replace(" ", "_")
+    username = kullanici_adi_duzelt(username)
     if not username or not password:
         return None
     conn = get_conn()

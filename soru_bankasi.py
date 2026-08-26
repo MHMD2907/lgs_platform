@@ -32,7 +32,7 @@ import re
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-26.3"
+SURUM = "2026-08-26.5"
 
 DERS_ADLARI = [
     "Türkçe",
@@ -1094,6 +1094,113 @@ def _unite_adi(adlar, ders, no, tek_ders, sayfadan=None):
     return None
 
 
+# ---------------------------------------------------------------------
+# 8. SINIF (LGS) MÜFREDAT ÜNİTE ADLARI
+#
+# NEDEN: Bu kitapların içindekiler sayfası bozuk yazı tipiyle basılı;
+# "Millî Bir Destan" -> "MLOov Bir Destan", "Zekât ve Sadaka" ->
+# "ZHNkW ve Sadaka" diye okunuyor. PDF'ten kopyalayıp yapıştırmak da
+# işe yaramıyor, çünkü kopyalanan metin de aynı bozuk hâlde geliyor.
+# Oysa 8. sınıf ünite adları MEB müfredatında SABİT. Kitaptan okunan ad
+# yoksa ya da bozuksa buradaki resmî ad kullanılıyor.
+#
+# GÜVENLİK: Yalnızca kitap 8. sınıf / LGS kitabıysa devreye giriyor ve
+# sonuç ekranında "müfredattan tamamlandı" diye bildiriliyor; kullanıcı
+# kaydetmeden önce tablodan değiştirebiliyor. Türkçe listelenmedi --
+# Türkçe'nin tema adları yayınevine göre değişiyor.
+# ---------------------------------------------------------------------
+MUFREDAT_8 = {
+    "T.C. İnkılap Tarihi ve Atatürkçülük": {
+        1: "Bir Kahraman Doğuyor",
+        2: "Millî Uyanış: Bağımsızlık Yolunda Atılan Adımlar",
+        3: "Millî Bir Destan: Ya İstiklal Ya Ölüm!",
+        4: "Atatürkçülük ve Çağdaşlaşan Türkiye",
+        5: "Demokratikleşme Çabaları",
+        6: "Atatürk Dönemi Türk Dış Politikası",
+        7: "Atatürk'ün Ölümü ve Sonrası",
+    },
+    "Din Kültürü ve Ahlak Bilgisi": {
+        1: "Kader ve Kaza İnancı",
+        2: "Zekât ve Sadaka",
+        3: "Din ve Hayat",
+        4: "Hz. Muhammed'in Örnekliği",
+        5: "Kur'an-ı Kerim ve Özellikleri",
+    },
+    "İngilizce": {
+        1: "Friendship",
+        2: "Teen Life",
+        3: "In the Kitchen",
+        4: "On the Phone",
+        5: "The Internet",
+        6: "Adventures",
+        7: "Tourism",
+        8: "Chores",
+        9: "Science",
+        10: "Natural Forces",
+    },
+    "Fen Bilimleri": {
+        1: "Mevsimler ve İklim",
+        2: "DNA ve Genetik Kod",
+        3: "Basınç",
+        4: "Madde ve Endüstri",
+        5: "Basit Makineler",
+        6: "Enerji Dönüşümleri ve Çevre Bilimi",
+        7: "Elektrik Yükleri ve Elektrik Enerjisi",
+    },
+    "Matematik": {
+        1: "Çarpanlar ve Katlar",
+        2: "Üslü İfadeler",
+        3: "Kareköklü İfadeler",
+        4: "Veri Analizi",
+        5: "Olasılık",
+        6: "Cebirsel İfadeler ve Özdeşlikler",
+        7: "Doğrusal Denklemler",
+        8: "Eşitsizlikler",
+        9: "Üçgenler",
+        10: "Eşlik ve Benzerlik",
+        11: "Dönüşüm Geometrisi",
+        12: "Geometrik Cisimler",
+    },
+}
+
+
+def _bozuk_ad_mi(ad):
+    """Okunan ünite adı bozuk yazı tipinden mi geliyor?
+
+    Ölçüt: bir KELİMENİN İÇİNDE (ilk harften sonra) büyük harf varken
+    aynı kelimede küçük harf de bulunuyorsa o kelime bozuktur.
+      "MLOov"  -> M L O o v   : içeride büyük + küçük var -> BOZUK
+      "ZHNkW"  -> Z H N k W   : BOZUK
+      "KaGer"  -> K a G e r   : BOZUK
+      "Ünite", "Ya İstiklal", "T.C.", "DNA" -> temiz."""
+    for kelime in re.split(r"[\s\.\,\:\;\!\?\(\)\-']+", ad or ""):
+        harfler = [c for c in kelime if c.isalpha()]
+        if len(harfler) < 3:
+            continue
+        if any(c.isupper() for c in harfler[1:]) and any(c.islower() for c in harfler):
+            return True
+    return False
+
+
+def _mufredat_adi(ders, no):
+    return (MUFREDAT_8.get(ders) or {}).get(no)
+
+
+def _sekizinci_sinif_mi(doc, tarama=6):
+    """Kitap 8. sınıf / LGS kitabı mı? İlk sayfalarda 'LGS' ya da
+    '8. SINIF' geçiyorsa evet."""
+    for i in range(min(tarama, len(doc))):
+        try:
+            metin = _sayfa_metni(doc, i)
+        except Exception:
+            continue
+        for okunus in (metin, _kaydirmayi_coz(metin)):
+            duz = _sadece_harfler(okunus)
+            if "LGS" in duz or "8SINIF" in duz or "8SNF" in duz:
+                return True
+    return False
+
+
 def _unite_basligi_metinden(metin):
     """Bir sayfanın ilk satırlarından '1. Ünite: Çarpanlar ve Katlar'
     biçimindeki başlığı okur. Döner: (unite_no, ad) ya da (None, None).
@@ -1662,6 +1769,8 @@ def unite_kitabini_coz(pdf_path, parca_soru=0, ilerleme=None, merkezi_atla=False
     try:
         adlar = _unite_adlari(doc)
         kitap_dersi = _kitap_dersi(doc)
+        sekizinci = _sekizinci_sinif_mi(doc)
+        mufredattan = []   # adı müfredattan tamamlanan üniteler
         # govde: [(sayfa_no, [soru numaralari], ders)] -- ders, o sayfanin
         # hangi derse ait oldugu (bkz. _sayfa_dersi). Liste YERINDE
         # degistiriliyor (clear/remove), yeniden atanmiyor: _kapat() bunu
@@ -1754,6 +1863,15 @@ def unite_kitabini_coz(pdf_path, parca_soru=0, ilerleme=None, merkezi_atla=False
                 ad = _unite_adi(adlar, ders, unite_no,
                                 len(kullanilan_dersler) <= 1,
                                 sayfadan=_sayfadan)
+                # ADI OKUNAMAYAN / BOZUK OKUNAN ÜNİTELER: 8. sınıf ünite
+                # adları MEB müfredatında sabit olduğu için oradan
+                # tamamlanıyor (bkz. MUFREDAT_8). Kullanıcı kitaptaki
+                # bozuk yazıyı elle düzeltmek zorunda kalmasın diye.
+                if sekizinci:
+                    _resmi = _mufredat_adi(ders, unite_no)
+                    if _resmi and (not ad or _bozuk_ad_mi(ad)):
+                        ad = _resmi
+                        mufredattan.append(f"{ders} {unite_no}. ünite")
                 kok = f"{unite_no}. {tur}" + (f" · {ad}" if ad else "")
                 parcalar = _parcala(bolum, cevaplar, parca_soru)
                 for pno, parca in enumerate(parcalar, start=1):
@@ -1891,6 +2009,14 @@ def unite_kitabini_coz(pdf_path, parca_soru=0, ilerleme=None, merkezi_atla=False
                  govde_dersi)
             )
         _kapat(acik)
+        if mufredattan:
+            uyarilar.append(
+                f"ℹ️ {len(mufredattan)} ünitenin adı kitapta okunamadığı için "
+                f"MEB 8. sınıf müfredatından tamamlandı "
+                f"({', '.join(mufredattan[:4])}"
+                f"{' ...' if len(mufredattan) > 4 else ''}). "
+                f"Aşağıdaki tablodan değiştirebilirsiniz."
+            )
     finally:
         doc.close()
     return testler, uyarilar
