@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-26.9"
+SURUM = "2026-08-26.11"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -1593,8 +1593,16 @@ def build_generic_structure(subject_rows):
 # Çözüm: menü SADECE henüz giriş yapılmamışken açık gelir (giriş kutusu
 # görünsün diye); giriş yapılır yapılmaz kapanır ve ekran tamamen
 # öğrenciye kalır.
+# TABLET/TELEFONDA "ANA EKRANA EKLE": Kısayolun simgesi, sayfanın
+# simgesinden alınır. Emoji kullanılırsa ana ekranda soluk, jenerik bir
+# kare çıkıyordu. Artık static klasöründeki gerçek LGS simgesi
+# kullanılıyor; dosya yoksa eskisi gibi emojiye düşüyor.
+_SIMGE_YOLU = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "static", "lgs192.png")
+_SAYFA_SIMGESI = _SIMGE_YOLU if os.path.exists(_SIMGE_YOLU) else "📚"
+
 st.set_page_config(
-    page_title=config.APP_TITLE, layout="wide", page_icon="📚",
+    page_title=config.APP_TITLE, layout="wide", page_icon=_SAYFA_SIMGESI,
     initial_sidebar_state=(
         "collapsed"
         if (st.session_state.get("student_name") or st.session_state.get("is_admin"))
@@ -1602,6 +1610,16 @@ st.set_page_config(
     ),
 )
 inject_css()
+
+# iPad / iPhone'da "Ana Ekrana Ekle" yapıldığında kullanılacak simge.
+# (Android Chrome simgeyi yukarıdaki page_icon'dan alır.)
+if os.path.exists(_SIMGE_YOLU):
+    st.markdown(
+        '<link rel="apple-touch-icon" href="./app/static/lgs192.png">'
+        '<meta name="apple-mobile-web-app-capable" content="yes">'
+        '<meta name="apple-mobile-web-app-title" content="M.ONUR LGS">',
+        unsafe_allow_html=True,
+    )
 
 # Yanındaki dosyalar eski sürümdeyse ÇÖKMEDEN önce net bir mesaj göster.
 _surum_uyarisi_goster()
