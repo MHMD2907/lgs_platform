@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-27.4"
+SURUM = "2026-08-27.5"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -1782,6 +1782,48 @@ if os.path.exists(_SIMGE_YOLU):
     a.rel = 'apple-touch-icon';
     a.href = '/app/static/lgs192.png';
     b.head.appendChild(a);
+
+    // ---------------------------------------------------------------
+    // "UYGULAMAYI YÖNET" DÜĞMESİ
+    // Streamlit Cloud sağ alta kendi düğmesini koyuyor; basınca
+    // Streamlit hesabına götürüyor. CSS ile gizlemek yetmiyor, çünkü
+    // düğme sayfa açıldıktan SONRA ekleniyor ve sürümden sürüme adı
+    // değişiyor. Bu yüzden yazısına/adresine bakıp kaldırıyoruz ve
+    // sonradan tekrar eklenirse diye izlemeye devam ediyoruz.
+    var kelimeler = ['manage app', 'uygulamayı yönet', 'uygulamayi yonet',
+                     'made with streamlit', 'streamlit ile yapıldı'];
+    function temizle() {
+      try {
+        var hedefler = b.querySelectorAll(
+          '#ManageAppButton, [data-testid="manage-app-button"],' +
+          '[class*="viewerBadge"], [class*="profileContainer"],' +
+          'a[href*="share.streamlit.io"], a[href*="streamlit.io/cloud"]');
+        for (var i = 0; i < hedefler.length; i++) {
+          hedefler[i].style.display = 'none';
+        }
+        var hepsi = b.querySelectorAll('button, a, div[role="button"]');
+        for (var j = 0; j < hepsi.length; j++) {
+          var t = (hepsi[j].textContent || '').trim().toLowerCase();
+          if (!t || t.length > 40) { continue; }
+          for (var k = 0; k < kelimeler.length; k++) {
+            if (t.indexOf(kelimeler[k]) !== -1) {
+              var kutu = hepsi[j].closest('div') || hepsi[j];
+              kutu.style.display = 'none';
+              break;
+            }
+          }
+        }
+      } catch (e) { /* sessizce geç */ }
+    }
+    temizle();
+    var sayac = 0;
+    var zaman = setInterval(function () {
+      temizle();
+      if (++sayac > 20) { clearInterval(zaman); }
+    }, 500);
+    if (window.MutationObserver) {
+      new MutationObserver(temizle).observe(b.body, {childList: true, subtree: true});
+    }
   } catch (e) { /* sessizce geç */ }
 })();
 </script>
