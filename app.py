@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-26.12"
+SURUM = "2026-08-27.3"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -1440,6 +1440,23 @@ def inject_css():
         div[data-testid="manage-app-button"],
         div[class^="viewerBadge"], div[class*=" viewerBadge"],
         a[href*="streamlit.io/cloud"] {display: none !important;}
+        /* SAĞ ALTTAKİ ROZET/DÜĞME: Kullanıcı bildirdi -- "tablette ve
+           telefonda sağ altta bir uygulama düğmesi var, yanlışlıkla
+           basınca kendi Streamlit/GitHub sayfama gidiyordu." Streamlit
+           Cloud bu düğmeyi sürümden sürüme farklı adlarla basıyor, o
+           yüzden hepsi birden kapatılıyor. */
+        #MainMenu, #ManageAppButton,
+        div[data-testid="stActionButtonIcon"],
+        div[data-testid="stAppViewerBadge"],
+        div[class*="profileContainer"],
+        div[class*="viewerBadge"],
+        a[class*="viewerBadge"],
+        a[href*="share.streamlit.io"],
+        a[href*="streamlit.app/?utm"],
+        a[href*="github.com"][class*="badge"],
+        iframe[title="Manage app"],
+        div[data-testid="stBottomBlockContainer"] > div[class*="badge"]
+            {display: none !important;}
         /* Menüyü geri açan düğme HER ZAMAN görünür ve rahat tıklanır olsun. */
         button[data-testid="stExpandSidebarButton"] {
             display: flex !important; visibility: visible !important;
@@ -1611,15 +1628,101 @@ st.set_page_config(
 )
 inject_css()
 
-# iPad / iPhone'da "Ana Ekrana Ekle" yapıldığında kullanılacak simge.
-# (Android Chrome simgeyi yukarıdaki page_icon'dan alır.)
+# EKRANIN SOL ÜSTÜNDEKİ LOGO: static/lgs512.png dosyası neyse o görünür.
+# Logoyu değiştirmek için sadece o dosyayı değiştirmek yeterli, kodda
+# hiçbir şey değişmez. (st.logo eski Streamlit sürümlerinde yok; o yüzden
+# sessizce atlanıyor.)
+_LOGO_YOLU = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "static", "lgs512.png")
+
+
+@st.cache_data(show_spinner=False)
+def _logo_veri_uri(yol, damga):
+    """Logoyu HTML'in içine gömülebilecek biçime çevirir.
+
+    NEDEN GÖMÜLÜ: Başlıklarda logoyu <img src="/app/static/..."> diye
+    göstermek, uygulama farklı bir adres altında çalıştığında (bulut,
+    yerel ağ) kırılabiliyor. Dosyanın kendisi HTML'e gömülünce her yerde
+    açılıyor. `damga` dosyanın değişme zamanı: logo değişince önbellek
+    kendiliğinden tazeleniyor."""
+    import base64
+
+    with open(yol, "rb") as f:
+        return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+
+
+def _logo_uri():
+    try:
+        if os.path.exists(_SIMGE_YOLU):
+            return _logo_veri_uri(_SIMGE_YOLU, os.stat(_SIMGE_YOLU).st_mtime_ns)
+    except Exception:
+        pass
+    return ""
+try:
+    if os.path.exists(_LOGO_YOLU):
+        st.logo(_LOGO_YOLU, icon_image=_SIMGE_YOLU, size="large")
+except Exception:
+    pass
+
+# ---------------------------------------------------------------------
+# "ANA EKRANA EKLE" SİMGESİ
+#
+# KULLANICI GERİ BİLDİRİMİ: "telefonda ikonum oluşmadı, Streamlit'in kendi
+# logosu oldu." Sebebi: Android'de ana ekran kısayolunun simgesi ve adı
+# sayfanın MANIFEST dosyasından okunur; Streamlit'in kendi manifest'i
+# devrede olduğu için Streamlit logosu çıkıyordu. (iPhone/iPad ise
+# apple-touch-icon etiketine bakar, o yüzden orada sorun yoktu.)
+#
+# Çözüm: sayfaya kendi manifest'imizi koyup Streamlit'inkini kaldırıyoruz.
+# Bu, HTML etiketiyle yapılamıyor -- tarayıcı ilk gördüğü manifest'i
+# kullanıyor ve o da Streamlit'inki. Bu yüzden küçük bir betikle
+# değiştiriliyor. Betik başarısız olursa hiçbir şey bozulmuyor, sadece
+# eski (Streamlit) simgesi kalıyor.
+# ---------------------------------------------------------------------
 if os.path.exists(_SIMGE_YOLU):
     st.markdown(
         '<link rel="apple-touch-icon" href="./app/static/lgs192.png">'
         '<meta name="apple-mobile-web-app-capable" content="yes">'
-        '<meta name="apple-mobile-web-app-title" content="M.ONUR LGS">',
+        '<meta name="mobile-web-app-capable" content="yes">'
+        '<meta name="apple-mobile-web-app-status-bar-style" content="default">'
+        '<meta name="apple-mobile-web-app-title" content="M.ONUR LGS">'
+        '<meta name="theme-color" content="#2563EB">',
         unsafe_allow_html=True,
     )
+    try:
+        import streamlit.components.v1 as _bilesen
+
+        _bilesen.html(
+            """
+<script>
+(function () {
+  try {
+    var b = window.parent && window.parent.document;
+    if (!b) { return; }
+    // Streamlit'in kendi manifest'ini kaldır
+    b.querySelectorAll('link[rel="manifest"]').forEach(function (x) {
+      x.parentNode.removeChild(x);
+    });
+    var m = b.createElement('link');
+    m.rel = 'manifest';
+    m.href = '/app/static/manifest.json';
+    b.head.appendChild(m);
+    // Ana ekran simgesi (iOS) ve sekme simgesi
+    b.querySelectorAll('link[rel="apple-touch-icon"]').forEach(function (x) {
+      x.parentNode.removeChild(x);
+    });
+    var a = b.createElement('link');
+    a.rel = 'apple-touch-icon';
+    a.href = '/app/static/lgs192.png';
+    b.head.appendChild(a);
+  } catch (e) { /* sessizce geç */ }
+})();
+</script>
+            """,
+            height=0,
+        )
+    except Exception:
+        pass
 
 # Yanındaki dosyalar eski sürümdeyse ÇÖKMEDEN önce net bir mesaj göster.
 _surum_uyarisi_goster()
@@ -1827,7 +1930,17 @@ def render_admin_login_form():
 
 
 with st.sidebar:
-    st.markdown(f"### 📚 {config.APP_TITLE}")
+    _u = _logo_uri()
+    if _u:
+        st.markdown(
+            f'<div style="display:flex;align-items:center;gap:.55rem;margin:.2rem 0 .6rem 0;">'
+            f'<img src="{_u}" width="36">'
+            f'<span style="font-size:1.15rem;font-weight:700;color:#1E3A8A;line-height:1.2;">'
+            f'{config.APP_TITLE}</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(f"### {config.APP_TITLE}")
 
     if st.session_state.pop("_timeout_notice", False):
         st.warning(
@@ -1945,10 +2058,16 @@ if (st.session_state.is_admin and not st.session_state.student_name
 # bilen herkes denemelere ulaşabiliyordu. Artık giriş yapılmadıysa sadece
 # aşağıdaki karşılama ekranı gösterilir ve script burada durur.
 if not st.session_state.student_name and not st.session_state.is_admin:
+    _u = _logo_uri()
+    # NOT: Logonun kendi yuvarlak kenarı ve parlaması zaten var; üstüne
+    # ayrıca gölge eklenince "iki kat gölge" görünüyordu. Sade bırakıldı.
+    _bas_logo = (f'<img src="{_u}" width="180" style="display:block;'
+                 f'margin:0 auto;">'
+                 if _u else '<div style="font-size:4.5rem;line-height:1;">📚</div>')
     st.markdown(
         f"""
         <div style="text-align:center; padding:3.5rem 1rem 2rem 1rem;">
-          <div style="font-size:4.5rem; line-height:1;">📚</div>
+          {_bas_logo}
           <h1 style="margin:0.6rem 0 0.2rem 0; color:#1E3A8A;">{config.APP_TITLE}</h1>
           <p style="font-size:1.15rem; color:#475569; margin-top:0.4rem;">
             Geçmiş yıl LGS denemelerini çöz, netlerini anında gör, gelişimini takip et.
