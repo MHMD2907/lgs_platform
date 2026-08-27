@@ -1,0 +1,32 @@
+{
+  "name": "M.ONUR LGS Eğitim Platformu",
+  "short_name": "M.ONUR LGS",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#FFFFFF",
+  "theme_color": "#2563EB",
+  "lang": "tr",
+  "icons": [
+    {
+      "src": "lgs192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "lgs512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "lgs512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
