@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-27.5"
+SURUM = "2026-08-27.6"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -1823,6 +1823,50 @@ if os.path.exists(_SIMGE_YOLU):
     }, 500);
     if (window.MutationObserver) {
       new MutationObserver(temizle).observe(b.body, {childList: true, subtree: true});
+    }
+
+    // ---------------------------------------------------------------
+    // "ANA EKRANA EKLE" DÜĞMESİ
+    // Kullanıcı tarayıcı menüsünde bu seçeneği bulamıyordu (telefonda
+    // iki ayrı üç-nokta menüsü var: tarayıcının ve uygulamanın).
+    // Chrome kurulum izni verdiğinde sayfanın kendi içinde bir düğme
+    // gösteriyoruz; tek dokunuşla ana ekrana ekleniyor.
+    var p = window.parent;
+    if (!p.__lgsKurulum) {
+      p.__lgsKurulum = true;
+      var bekleyen = null;
+      var dugme = null;
+      function dugmeyiGoster() {
+        if (dugme || !bekleyen) { return; }
+        dugme = b.createElement('button');
+        dugme.textContent = '📲 Ana ekrana ekle';
+        dugme.setAttribute('style',
+          'position:fixed;left:50%;transform:translateX(-50%);bottom:18px;' +
+          'z-index:2147483647;background:#2563EB;color:#fff;border:0;' +
+          'border-radius:999px;padding:12px 22px;font-size:15px;' +
+          'font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.28);' +
+          'cursor:pointer;font-family:inherit;');
+        dugme.onclick = function () {
+          dugme.style.display = 'none';
+          bekleyen.prompt();
+          bekleyen.userChoice.then(function () { bekleyen = null; });
+        };
+        b.body.appendChild(dugme);
+      }
+      p.addEventListener('beforeinstallprompt', function (e) {
+        e.preventDefault();
+        bekleyen = e;
+        dugmeyiGoster();
+      });
+      p.addEventListener('appinstalled', function () {
+        if (dugme) { dugme.style.display = 'none'; }
+      });
+      // Zaten ana ekrandan açıldıysa düğmeye gerek yok
+      try {
+        if (p.matchMedia && p.matchMedia('(display-mode: standalone)').matches) {
+          p.__lgsKurulu = true;
+        }
+      } catch (e2) {}
     }
   } catch (e) { /* sessizce geç */ }
 })();

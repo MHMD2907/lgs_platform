@@ -23,7 +23,7 @@ import tempfile
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-27.5"
+SURUM = "2026-08-27.6"
 from PyPDF2 import PdfReader, PdfWriter
 
 try:
