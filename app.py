@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-27.6"
+SURUM = "2026-08-27.7"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -1759,6 +1759,13 @@ if os.path.exists(_SIMGE_YOLU):
     try:
         import streamlit.components.v1 as _bilesen
 
+        try:
+            import logo_verisi
+
+            logo_surumu = logo_verisi.SURUM
+        except Exception:
+            logo_surumu = "1"
+
         _bilesen.html(
             """
 <script>
@@ -1766,14 +1773,22 @@ if os.path.exists(_SIMGE_YOLU):
   try {
     var b = window.parent && window.parent.document;
     if (!b) { return; }
-    // Streamlit'in kendi manifest'ini kaldır
-    b.querySelectorAll('link[rel="manifest"]').forEach(function (x) {
-      x.parentNode.removeChild(x);
-    });
-    var m = b.createElement('link');
-    m.rel = 'manifest';
-    m.href = '/app/static/manifest.json';
-    b.head.appendChild(m);
+    // Streamlit'in kendi manifest'ini kaldirip bizimkini koy.
+    // Tarayici manifest'i onbellege aldigi icin adresin sonuna surum
+    // ekleniyor; logo degisince yeniden okunuyor.
+    function manifestiKur() {
+      var v = b.querySelector('link[rel="manifest"][data-lgs="1"]');
+      b.querySelectorAll('link[rel="manifest"]').forEach(function (x) {
+        if (x !== v) { x.parentNode.removeChild(x); }
+      });
+      if (v) { return; }
+      var m = b.createElement('link');
+      m.rel = 'manifest';
+      m.setAttribute('data-lgs', '1');
+      m.href = '/app/static/manifest.json?v=__SURUM__';
+      b.head.appendChild(m);
+    }
+    manifestiKur();
     // Ana ekran simgesi (iOS) ve sekme simgesi
     b.querySelectorAll('link[rel="apple-touch-icon"]').forEach(function (x) {
       x.parentNode.removeChild(x);
@@ -1813,6 +1828,7 @@ if os.path.exists(_SIMGE_YOLU):
             }
           }
         }
+        manifestiKur();
       } catch (e) { /* sessizce geç */ }
     }
     temizle();
@@ -1871,7 +1887,7 @@ if os.path.exists(_SIMGE_YOLU):
   } catch (e) { /* sessizce geç */ }
 })();
 </script>
-            """,
+            """.replace("__SURUM__", logo_surumu),
             height=0,
         )
     except Exception:
