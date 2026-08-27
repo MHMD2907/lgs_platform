@@ -22,7 +22,7 @@ from datetime import datetime
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lgs_platform.db")
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-08-26.11"
+SURUM = "2026-08-26.12"
 
 DEFAULT_CATEGORIES = [
     "8. Sınıf (LGS)",
@@ -620,7 +620,17 @@ def ensure_default_admin(username, display_name, password):
     admin panelinden şifre değiştirildikten sonra bu fonksiyon onu geri almaz."""
     username = kullanici_adi_duzelt(username or "admin")
     conn = get_conn()
-    exists = conn.execute("SELECT 1 FROM admins WHERE username = ?", (username,)).fetchone()
+    # ÖNEMLİ - "DEĞİŞTİRDİĞİM ESKİ YÖNETİCİ ADI GERİ GELİYOR": Burada
+    # eskiden SADECE bu kullanıcı adı var mı diye bakılıyordu. Yönetici,
+    # panelden kullanıcı adını değiştirdiğinde config.py'deki eski ad
+    # artık tabloda bulunmuyor ve program her açılışta o eski hesabı
+    # VARSAYILAN ŞİFREYLE yeniden oluşturuyordu. Yani değiştirdiğiniz
+    # kullanıcı adı+şifre yanınızda dururken, eski "admin" hesabı da
+    # arka kapı gibi açık kalıyordu.
+    # Artık kural şu: tabloda HERHANGİ bir yönetici varsa hiçbir şey
+    # yapılmaz. İlk hesap yalnızca tablo bomboşken kurulur.
+    _var_mi = conn.execute("SELECT 1 FROM admins LIMIT 1").fetchone()
+    exists = _var_mi
     if not exists:
         salt, pw_hash = _hash_password(password)
         conn.execute(
@@ -630,6 +640,25 @@ def ensure_default_admin(username, display_name, password):
         )
         conn.commit()
     conn.close()
+
+
+@_onbellekli
+def admin_var_mi(username):
+    """Bu kullanıcı adında bir yönetici hesabı var mı?
+
+    Giriş ekranı, kullanıcı adı kutusunu buna göre dolduruyor:
+    config.py'deki başlangıç adı artık kullanılmıyorsa (yönetici adını
+    değiştirmişse) kutu BOŞ açılıyor -- yoksa ekranda olmayan bir ad
+    yazılı duruyor ve "şifrem çalışmıyor" sanılıyor."""
+    if not username:
+        return False
+    conn = get_conn()
+    try:
+        return bool(conn.execute(
+            "SELECT 1 FROM admins WHERE username = ?",
+            (kullanici_adi_duzelt(username),)).fetchone())
+    finally:
+        conn.close()
 
 
 def verify_admin(username, password):

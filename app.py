@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-26.11"
+SURUM = "2026-08-26.12"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -1805,7 +1805,15 @@ def render_student_login_form():
 
 
 def render_admin_login_form():
-    admin_user = st.text_input("Kullanıcı Adı", key="admin_user", value=config.ADMIN_USERNAME)
+    # Kutu, config.py'deki başlangıç adıyla dolduruluyordu. Yönetici adını
+    # panelden değiştirdiyseniz o ad artık YOK; kutuda yazılı duruyor ve
+    # "şifrem çalışmıyor" sanılıyordu. Artık ad gerçekten varsa dolduruluyor.
+    try:
+        _hazir_ad = (config.ADMIN_USERNAME
+                     if db.admin_var_mi(config.ADMIN_USERNAME) else "")
+    except Exception:
+        _hazir_ad = config.ADMIN_USERNAME
+    admin_user = st.text_input("Kullanıcı Adı", key="admin_user", value=_hazir_ad)
     admin_pw = st.text_input("Şifre", type="password", key="admin_pw")
     if st.button("Giriş Yap", key="admin_login_btn", type="primary", use_container_width=True):
         admin = db.verify_admin(admin_user, admin_pw)
