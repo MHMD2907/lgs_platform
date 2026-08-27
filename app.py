@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-27.3"
+SURUM = "2026-08-27.4"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -1614,8 +1614,75 @@ def build_generic_structure(subject_rows):
 # simgesinden alınır. Emoji kullanılırsa ana ekranda soluk, jenerik bir
 # kare çıkıyordu. Artık static klasöründeki gerçek LGS simgesi
 # kullanılıyor; dosya yoksa eskisi gibi emojiye düşüyor.
-_SIMGE_YOLU = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "static", "lgs192.png")
+_STATIK_KOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+_SIMGE_YOLU = os.path.join(_STATIK_KOK, "lgs192.png")
+
+_MANIFEST = {
+    "name": config.APP_TITLE,
+    "short_name": "M.ONUR LGS",
+    "id": "/",
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "orientation": "any",
+    "background_color": "#FFFFFF",
+    "theme_color": "#2563EB",
+    "lang": "tr",
+    "icons": [
+        {"src": "lgs192.png", "sizes": "192x192", "type": "image/png",
+         "purpose": "any"},
+        {"src": "lgs512.png", "sizes": "512x512", "type": "image/png",
+         "purpose": "any"},
+        {"src": "lgs512.png", "sizes": "512x512", "type": "image/png",
+         "purpose": "maskable"},
+    ],
+}
+
+
+def _simgeleri_hazirla():
+    """Logo dosyalarini KODUN ICINDEN uretir (bkz. logo_verisi.py).
+
+    ÖNEMLİ - "TELEFONDA HÂLÂ ESKİ SİMGE ÇIKIYOR": Simge dosyalarinin
+    GitHub'a elle, dogru klasor yapisiyla yuklenmesi gerekiyordu.
+    static/ klasoru olusmadigi icin uygulama simgeyi bulamiyor ve
+    yedek olarak kitap emojisine dusuyordu -- telefonda gorulen "ust
+    uste kitaplar" tam olarak o emojiydi. Artik dosyalar uygulama
+    acilirken kendiliginden yaziliyor; GitHub'a resim yuklemek
+    gerekmiyor."""
+    try:
+        import base64
+        import io
+
+        import logo_verisi
+
+        os.makedirs(_STATIK_KOK, exist_ok=True)
+        izx = os.path.join(_STATIK_KOK, ".simge_surum")
+        gerekli = [
+            os.path.join(_STATIK_KOK, "lgs512.png"),
+            _SIMGE_YOLU,
+            os.path.join(_STATIK_KOK, "manifest.json"),
+        ]
+        mevcut = ""
+        if os.path.exists(izx):
+            with open(izx, encoding="utf-8") as f:
+                mevcut = f.read().strip()
+        if mevcut == logo_verisi.SURUM and all(os.path.exists(y) for y in gerekli):
+            return
+        from PIL import Image
+
+        ham = base64.b64decode(logo_verisi.LOGO_B64)
+        im = Image.open(io.BytesIO(ham)).convert("RGBA")
+        im.save(gerekli[0])
+        im.resize((192, 192), Image.LANCZOS).save(gerekli[1])
+        with open(gerekli[2], "w", encoding="utf-8") as f:
+            json.dump(_MANIFEST, f, ensure_ascii=False, indent=2)
+        with open(izx, "w", encoding="utf-8") as f:
+            f.write(logo_verisi.SURUM)
+    except Exception:
+        pass  # logo olusmazsa uygulama yine calisir, sadece emoji gorunur
+
+
+_simgeleri_hazirla()
 _SAYFA_SIMGESI = _SIMGE_YOLU if os.path.exists(_SIMGE_YOLU) else "📚"
 
 st.set_page_config(
