@@ -23,7 +23,7 @@ import tempfile
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-09-02.3"
+SURUM = "2026-09-02.4"
 from PyPDF2 import PdfReader, PdfWriter
 
 try:
@@ -410,6 +410,24 @@ def filigrani_kaldir(yol, cikis=None):
     silinen = 0
     try:
         for sayfa in pdf.pages:
+            # 1) DAMGA "NOT" OLARAK EKLENMISSE (2018 ve sonrasi ÖSYM
+            #    kitapciklari boyle): sayfanin icerigine hic dokunulmadan,
+            #    /Subtype /Watermark tipindeki eklentiler siliniyor.
+            #    (Eski kodun bulamamasinin sebebi buydu: damga sayfa
+            #    icerigi degil, sayfaya ILISTIRILMIS bir nesneydi.)
+            try:
+                if "/Annots" in sayfa:
+                    from pikepdf import Name
+                    kalan_not = [a for a in sayfa["/Annots"]
+                                 if a.get("/Subtype") != Name("/Watermark")]
+                    if len(kalan_not) != len(sayfa["/Annots"]):
+                        silinen += len(sayfa["/Annots"]) - len(kalan_not)
+                        if kalan_not:
+                            sayfa["/Annots"] = pdf.make_indirect(kalan_not)
+                        else:
+                            del sayfa["/Annots"]
+            except Exception:
+                pass
             kaynak = sayfa.get("/Resources")
             try:
                 kutu = [float(x) for x in sayfa.MediaBox]
@@ -611,15 +629,24 @@ def _sayfa_ikilileri(page):
     return _ikilileri_esle(numtoks, lettoks)
 
 
-def _ikilileri_esle(numtoks, lettoks):
+def _ikilileri_esle(numtoks, lettoks, sol=-2):
     """Her soru numarasina, aynı satirda hemen SAGINDAKI harfi eslestirir.
     (Hem PDF metninden hem OCR'dan gelen token'lar icin ortak kullanilir;
-    koordinatlar her iki durumda da 'punto' biriminde olmali.)"""
+    koordinatlar her iki durumda da 'punto' biriminde olmali.)
+
+    sol: harfin kutusu, numaranin kutusuyla ne kadar CAKISABILIR. PDF
+    metninde kutular kesin oldugu icin -2 yetiyor; OCR'da kutular biraz
+    genis ciktigi icin ("1." kutusu yanindaki harfin uzerine tasiyor) daha
+    genis bir pay gerekiyor. Her durumda harf, numaranin SOL kenarindan
+    once baslayamaz -- boylece soldaki sutunun harfi yanlislikla
+    eslestirilmez."""
     ikililer = []
     for nt in numtoks:
         aday = [
             lt for lt in lettoks
-            if abs(lt["top"] - nt["top"]) < 7 and -2 < (lt["x0"] - nt["x1"]) < 45
+            if abs(lt["top"] - nt["top"]) < 7
+            and sol < (lt["x0"] - nt["x1"]) < 45
+            and lt["x0"] >= nt["x0"] - 1
         ]
         if not aday:
             continue
@@ -648,13 +675,59 @@ def _ikilileri_esle(numtoks, lettoks):
 # anahtar "OCR" etiketiyle donduruldugu icin ekranda kullaniciya
 # "gozden gecirin" uyarisi gosterilir.
 
-def _ocr_var_mi():
-    """Tesseract kurulu mu? (Streamlit Cloud icin packages.txt'te var.)"""
+_RAPID = {"motor": None}
+
+
+def _ocr_motoru():
+    """Hangi OCR motoru kullanilabilir?  "tesseract" | "rapid" | None
+
+    ONEMLI - IKI MOTOR NEDEN VAR: Tesseract hizli ve hafif ama bir SISTEM
+    programi; Streamlit Cloud'a packages.txt ile kuruluyor, Windows'ta ise
+    kullanicinin ayrica kurmasi gerekir (kurmayacak). Bu yuzden ikinci
+    motor olarak, tamamen pip ile kurulan RapidOCR var: yerel bilgisayarda
+    da calisiyor. Once tesseract denenir (hizli), yoksa RapidOCR."""
     try:
         import pytesseract  # noqa: F401
+        if shutil.which("tesseract"):
+            return "tesseract"
     except Exception:
-        return False
-    return shutil.which("tesseract") is not None
+        pass
+    try:
+        import rapidocr_onnxruntime  # noqa: F401
+        return "rapid"
+    except Exception:
+        return None
+
+
+def _ocr_var_mi():
+    return _ocr_motoru() is not None
+
+
+def _rapid_kelimeleri(resim):
+    """RapidOCR ile kelime kutulari: [(metin, x0, x1, ust), ...] (piksel)."""
+    try:
+        import numpy as np
+        from rapidocr_onnxruntime import RapidOCR
+    except Exception:
+        return []
+    if _RAPID["motor"] is None:
+        try:
+            _RAPID["motor"] = RapidOCR()
+        except Exception:
+            return []
+    try:
+        sonuc, _ = _RAPID["motor"](np.array(resim.convert("RGB")))
+    except Exception:
+        return []
+    kelimeler = []
+    for kutu, metin, _skor in (sonuc or []):
+        try:
+            xs = [nokta[0] for nokta in kutu]
+            ys = [nokta[1] for nokta in kutu]
+            kelimeler.append((metin, min(xs), max(xs), min(ys)))
+        except Exception:
+            continue
+    return kelimeler
 
 
 def _ocr_ikilileri(pdf_yolu, idx, dpi=300, hedef=0):
@@ -662,11 +735,11 @@ def _ocr_ikilileri(pdf_yolu, idx, dpi=300, hedef=0):
 
     hedef verilirse (beklenen cevap sayisi), o sayiya ulasan ilk kip
     yeterli sayilir -- gereksiz OCR turu yapilmaz, islem hizlanir."""
-    if not _ocr_var_mi():
+    motor = _ocr_motoru()
+    if motor is None:
         return []
     try:
         import pypdfium2 as pdfium
-        import pytesseract
     except Exception:
         return []
     try:
@@ -692,24 +765,29 @@ def _ocr_ikilileri(pdf_yolu, idx, dpi=300, hedef=0):
     # Olculdu (2016 KPSS anahtar sayfasi, 4 sutun): psm 6 -> 119 ikili,
     # psm 4 -> 120 (tam). Tek moda guvenmeyip en cok ikili vereni
     # seciyoruz; boylece baska duzenlerde de en iyi sonuc aliniyor.
+    kipler = ("--psm 4", "--psm 6", "--psm 3") if motor == "tesseract" else (None,)
     en_iyi = []
-    for kip in ("--psm 4", "--psm 6", "--psm 3"):
-        try:
-            veri = pytesseract.image_to_data(
-                resim, config=kip, output_type=pytesseract.Output.DICT)
-        except Exception:
-            continue
+    for kip in kipler:
+        if motor == "tesseract":
+            try:
+                import pytesseract
+                veri = pytesseract.image_to_data(
+                    resim, config=kip, output_type=pytesseract.Output.DICT)
+                kelimeler = [
+                    (veri["text"][i], veri["left"][i],
+                     veri["left"][i] + veri["width"][i], veri["top"][i])
+                    for i in range(len(veri.get("text", [])))
+                ]
+            except Exception:
+                continue
+        else:
+            kelimeler = _rapid_kelimeleri(resim)
         numtoks, lettoks = [], []
-        for i, ham in enumerate(veri.get("text", [])):
+        for ham, sol, sag, tepe in kelimeler:
             txt = (ham or "").strip()
             if not txt:
                 continue
-            try:
-                x0 = veri["left"][i] * olcek
-                x1 = (veri["left"][i] + veri["width"][i]) * olcek
-                ust = veri["top"][i] * olcek
-            except Exception:
-                continue
+            x0, x1, ust = sol * olcek, sag * olcek, tepe * olcek
             m = _IKILI.match(txt)
             if m:
                 n = int(m.group(1))
@@ -729,7 +807,8 @@ def _ocr_ikilileri(pdf_yolu, idx, dpi=300, hedef=0):
                     numtoks.append({"x0": x0, "x1": x1, "top": ust, "num": n})
                     lettoks.append({"x0": x1, "top": ust,
                                     "letter": m2.group(2).upper()})
-        sonuc = _ikilileri_esle(numtoks, lettoks)
+        # OCR kutulari genis; cakisma payi buyuk tutuluyor.
+        sonuc = _ikilileri_esle(numtoks, lettoks, sol=-20)
         if len(sonuc) > len(en_iyi):
             en_iyi = sonuc
         if hedef and len(en_iyi) >= hedef:

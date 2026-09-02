@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-09-02.3"
+SURUM = "2026-09-02.4"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
