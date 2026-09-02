@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-27.8"
+SURUM = "2026-09-02.1"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -4634,9 +4634,50 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     st.session_state.pop("_kd_onay", None)
                     st.rerun()
             elif _secili:
-                if st.button(f"🗑️ Seçilen {len(_secili)} denemeyi sil",
-                             type="primary"):
+                _b1, _b2 = st.columns(2)
+                if _b1.button(f"🗑️ Seçilen {len(_secili)} denemeyi sil",
+                              type="primary", use_container_width=True):
                     st.session_state["_kd_onay"] = [(e["id"], e["title"]) for e in _secili]
+                    st.rerun()
+                # TOPLU FİLİGRAN TEMİZLİĞİ: Daha önce eklenmiş yüzlerce
+                # denemenin damgasını tek tek silmek çok tıklama demekti.
+                # İşaretlenenlerin hepsi tek düğmeyle temizleniyor.
+                if _b2.button(f"🧼 Seçilen {len(_secili)} denemenin filigranını temizle",
+                              use_container_width=True):
+                    _bar = st.progress(0.0, text="Filigranlar temizleniyor...")
+                    _temiz, _zaten, _hatali = 0, 0, []
+                    for _n, _e in enumerate(_secili, start=1):
+                        _bar.progress(_n / len(_secili),
+                                      text=f"{_n}/{len(_secili)} · {_e['title'][:40]}")
+                        _y, _h = _pdf_yolu_onbellekli(
+                            _e["id"], _e.get("pdf_path"), _e.get("source_url"))
+                        if not _y:
+                            _hatali.append(_e["title"])
+                            continue
+                        try:
+                            _adet = parsing.filigrani_kaldir(_y)
+                        except Exception:
+                            _hatali.append(_e["title"])
+                            continue
+                        if _adet:
+                            with open(_y, "rb") as _f:
+                                db.pdf_kaydet(_e["id"], os.path.basename(_y), _f.read())
+                            _temiz += 1
+                        else:
+                            _zaten += 1
+                    _pdf_yolu_onbellekli.clear()
+                    _pdf_page_image.clear()
+                    _mesaj = [("success",
+                               f"🧼 {_temiz} denemenin filigranı temizlendi."
+                               + (f" {_zaten} denemede silinecek damga yoktu."
+                                  if _zaten else ""))]
+                    if _hatali:
+                        _mesaj.append((
+                            "error",
+                            f"❌ {len(_hatali)} denemenin kitapçığına ulaşılamadı: "
+                            + ", ".join(_hatali[:5])
+                            + (" ..." if len(_hatali) > 5 else "")))
+                    st.session_state["_admin_flash"] = _mesaj
                     st.rerun()
             st.divider()
 
