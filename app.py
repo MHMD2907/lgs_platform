@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-09-02.4"
+SURUM = "2026-09-02.5"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -3767,6 +3767,17 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                        else f"  ·  anahtar kitapçığın {(_kesif['sayfa'] or 0) + 1}. sayfasında "
                             f"(o sayfa ve sonrası öğrenciye gösterilmez).")
                 )
+                if "resimden okundu" in (_kesif.get("mesaj") or ""):
+                    # Anahtar sayfası PDF'e yazı olarak değil çizim/resim
+                    # olarak gömülmüş; harfler resimden okundu. Neredeyse
+                    # her zaman doğru ama %100 değil -- göz gezdirilsin.
+                    st.warning(
+                        "Bu kitapçıkta cevap anahtarı yazı olarak değil **resim/çizim** "
+                        "olarak gömülü; harfler resimden okundu. Kaydetmeden önce "
+                        "aşağıdaki cevaplara bir göz atın."
+                    )
+                    for _d, _v in _kesif["cevaplar"].items():
+                        st.caption(f"**{_d}:** " + "".join(_v))
                 if st.button("↩️ Tarama sonucunu temizle, elle gireyim", key="_man_temizle"):
                     st.session_state.pop("_man_kesif", None)
                     st.rerun()

@@ -23,7 +23,7 @@ import tempfile
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-09-02.4"
+SURUM = "2026-09-02.5"
 from PyPDF2 import PdfReader, PdfWriter
 
 try:
@@ -731,17 +731,27 @@ def _rapid_kelimeleri(resim):
 
 
 def _ocr_ikilileri(pdf_yolu, idx, dpi=300, hedef=0):
-    """Bir sayfayi OCR ile okuyup (soru_no, harf) ikililerini dondurur.
+    """Bir sayfanin OCR ile okunmus (soru_no, harf) ikilileri."""
+    return _ocr_sayfa(pdf_yolu, idx, dpi, hedef)[0]
+
+
+def _ocr_sayfa(pdf_yolu, idx, dpi=300, hedef=0):
+    """Bir sayfayi OCR ile okur.
+
+    Doner: (ikililer, kelimeler) -- kelimeler, pdfplumber'in
+    extract_words() bicimindedir ({"text","x0","x1","top"}, punto), boylece
+    ders BASLIKLARI da (Genel Yetenek / Genel Kultur gibi) ayni kodla
+    okunabilir.
 
     hedef verilirse (beklenen cevap sayisi), o sayiya ulasan ilk kip
     yeterli sayilir -- gereksiz OCR turu yapilmaz, islem hizlanir."""
     motor = _ocr_motoru()
     if motor is None:
-        return []
+        return [], []
     try:
         import pypdfium2 as pdfium
     except Exception:
-        return []
+        return [], []
     try:
         doc = pdfium.PdfDocument(pdf_yolu)
         try:
@@ -754,19 +764,19 @@ def _ocr_ikilileri(pdf_yolu, idx, dpi=300, hedef=0):
         finally:
             doc.close()
     except Exception:
-        return []
+        return [], []
     # Acik gri damgayi at, siyah yaziyi birak.
     try:
         resim = resim.point(lambda p: 0 if p < 110 else 255).convert("L")
     except Exception:
-        return []
+        return [], []
     olcek = 72.0 / dpi
     # ONEMLI: Tesseract'in sayfa duzeni modu sonucu belirgin degistiriyor.
     # Olculdu (2016 KPSS anahtar sayfasi, 4 sutun): psm 6 -> 119 ikili,
     # psm 4 -> 120 (tam). Tek moda guvenmeyip en cok ikili vereni
     # seciyoruz; boylece baska duzenlerde de en iyi sonuc aliniyor.
     kipler = ("--psm 4", "--psm 6", "--psm 3") if motor == "tesseract" else (None,)
-    en_iyi = []
+    en_iyi, en_iyi_kelime = [], []
     for kip in kipler:
         if motor == "tesseract":
             try:
@@ -782,12 +792,13 @@ def _ocr_ikilileri(pdf_yolu, idx, dpi=300, hedef=0):
                 continue
         else:
             kelimeler = _rapid_kelimeleri(resim)
-        numtoks, lettoks = [], []
+        numtoks, lettoks, sozcukler = [], [], []
         for ham, sol, sag, tepe in kelimeler:
             txt = (ham or "").strip()
             if not txt:
                 continue
             x0, x1, ust = sol * olcek, sag * olcek, tepe * olcek
+            sozcukler.append({"text": txt, "x0": x0, "x1": x1, "top": ust})
             m = _IKILI.match(txt)
             if m:
                 n = int(m.group(1))
@@ -810,12 +821,12 @@ def _ocr_ikilileri(pdf_yolu, idx, dpi=300, hedef=0):
         # OCR kutulari genis; cakisma payi buyuk tutuluyor.
         sonuc = _ikilileri_esle(numtoks, lettoks, sol=-20)
         if len(sonuc) > len(en_iyi):
-            en_iyi = sonuc
+            en_iyi, en_iyi_kelime = sonuc, sozcukler
         if hedef and len(en_iyi) >= hedef:
             break          # aranan sayiya ulasildi, digerlerine gerek yok
         if len(en_iyi) >= 20 and kip == "--psm 6":
             break          # iki kip yetti, ucuncuye gerek yok
-    return en_iyi
+    return en_iyi, en_iyi_kelime
 
 
 def _duzgunluk(diziler):
@@ -1033,6 +1044,12 @@ _DERS_TAKMALARI = {
     # ÇEVRİLMEZ. YDS gibi sınavlarda o başlık Almanca/Fransızca da
     # olabilir; PDF'te ne yazıyorsa o korunur.
     "Yabancı Dil": ["Yabancı Dil", "Yabanci Dil"],
+    # KPSS/ALES başlıkları. Sayfada "GENEL YETENEK TESTİ" yazıyor; ayrıca
+    # anahtar sayfası resimden okunduğunda Türkçe harfler kaybolabiliyor
+    # ("KULTUR"). İkisi de aynı derse çıksın diye takma adlar burada.
+    "Genel Yetenek": ["Genel Yetenek", "Genel Yetenek Testi"],
+    "Genel Kültür": ["Genel Kültür", "Genel Kultur", "Genel Kültür Testi"],
+    "Eşit Ağırlık": ["Eşit Ağırlık", "Esit Agirlik"],
 }
 _TR_KATLAMA = str.maketrans("ÇçĞğİıÖöŞşÜüÂâÎîÛû", "CcGgIiOoSsUuAaIiUu")
 
@@ -1272,7 +1289,7 @@ def _tekrari_at(metin):
     return metin
 
 
-def _blok_basligi(page, blok, kullanilan):
+def _blok_basligi(kelimeler, blok, kullanilan):
     """Bir cevap bloğunun ÜSTÜNDEKİ başlık yazısını okur.
 
     Başlık iki satıra sarmış olabilir; blok genişliğine denk gelen en fazla
@@ -1283,20 +1300,29 @@ def _blok_basligi(page, blok, kullanilan):
     sag = max(t["x"] for t in blok) + 60
     ust = min(t["top"] for t in blok)
     adaylar = [
-        w for w in page.extract_words()
+        w for w in kelimeler
         if ust - 90 < w["top"] < ust - 3
         and w["x1"] > sol and w["x0"] < sag
         and re.search(r"[A-Za-zÇĞİÖŞÜçğıöşü]", w["text"] or "")
     ]
     if not adaylar:
         return None
-    satirlar = {}
-    for w in adaylar:
-        satirlar.setdefault(round(w["top"] / 5), []).append(w)
-    sirali_satirlar = sorted(satirlar.items(), reverse=True)[:2]   # en yakın 2 satır
+    # ÖNEMLİ - SATIRLARI GRUPLARKEN: Eskiden satırlar top/5 yuvarlanarak
+    # gruplanıyordu. Aynı satırdaki kelimelerin üst kenarı 1-2 punto
+    # oynadığında bu, tek satırı İKİYE bölüyordu: "GENEL KÜLTÜR TESTİ"
+    # başlığı "KÜLTÜR TESTİ" + "GENEL" diye ayrılıp ders adı "Genel"
+    # kalıyordu. Artık sabit kutulara değil, ARALARINDAKİ MESAFEYE göre
+    # gruplanıyor.
+    satirlar = []
+    for w in sorted(adaylar, key=lambda z: (z["top"], z["x0"])):
+        if satirlar and abs(w["top"] - satirlar[-1][0]) < 6:
+            satirlar[-1][1].append(w)
+        else:
+            satirlar.append([w["top"], [w]])
     parcalar = []
-    for _k, kelimeler in sorted(sirali_satirlar):
-        parcalar.append(" ".join(w["text"] for w in sorted(kelimeler, key=lambda z: z["x0"])))
+    for _ust, sozler in satirlar[-2:]:                 # en yakın 2 satır
+        parcalar.append(" ".join(
+            w["text"] for w in sorted(sozler, key=lambda z: z["x0"])))
     ham = " ".join(parcalar).strip(" :.-")
     ham = re.sub(r"\s+", " ", ham)
     ham = _tekrari_at(ham)
@@ -1321,32 +1347,76 @@ def anahtar_kesfet(pdf_yolu, tara=14):
     VARSAYMADAN okur. Her sınav türünde çalışır (LGS, İOKBS, KPSS, ALES...).
 
     Döner: (cevaplar {ders: [harf,...]}, sayfa_indeksi, mesaj)"""
+    def _coz(ikililer, kelimeler):
+        """Bir sayfanin ikili+kelimelerinden ders bloklarini cikarir."""
+        if len(ikililer) < 5:
+            return None
+        bloklar = _ders_bloklari(ikililer)
+        if not bloklar:
+            return None
+        cevaplar, kullanilan = {}, []
+        for i, blok in enumerate(bloklar, start=1):
+            ad = _blok_basligi(kelimeler, blok, kullanilan)
+            if not ad or ad in cevaplar:
+                ad = ad or f"Bölüm {i}"
+                if ad in cevaplar:
+                    ad = f"{ad} ({i})"
+            kullanilan.append(ad)
+            cevaplar[ad] = [t["harf"] for t in blok]
+        return cevaplar or None
+
     adaylar = _anahtar_sayfa_adaylari(pdf_yolu, tara)
-    if not adaylar:
-        return None, None, "Cevap anahtarı sayfası bulunamadı."
-    with pdfplumber.open(pdf_yolu) as pdf:
-        for idx in adaylar:
-            if idx >= len(pdf.pages):
-                continue
-            page = pdf.pages[idx]
-            ikililer = _sayfa_ikilileri(page)
-            if len(ikililer) < 5:
-                continue
-            bloklar = _ders_bloklari(ikililer)
-            if not bloklar:
-                continue
-            cevaplar, kullanilan = {}, []
-            for i, blok in enumerate(bloklar, start=1):
-                ad = _blok_basligi(page, blok, kullanilan)
-                if not ad or ad in cevaplar:
-                    ad = ad or f"Bölüm {i}"
-                    if ad in cevaplar:
-                        ad = f"{ad} ({i})"
-                kullanilan.append(ad)
-                cevaplar[ad] = [t["harf"] for t in blok]
-            if cevaplar:
+    if adaylar:
+        with pdfplumber.open(pdf_yolu) as pdf:
+            for sira, idx in enumerate(adaylar):
+                if idx >= len(pdf.pages):
+                    continue
+                page = pdf.pages[idx]
+                cevaplar = _coz(_sayfa_ikilileri(page), page.extract_words())
+                if not cevaplar:
+                    continue
+                # ÖNEMLİ: Anahtar İKİ SAYFAYA yayılmış olabilir -- 2015 KPSS
+                # kitapçığında her ders ayrı sayfada. Sadece ilk sayfayı
+                # okuyup dönmek, ikinci dersi (Genel Kültür) tamamen
+                # kaçırıyordu. Hemen ardından gelen sayfa da anahtar
+                # sayfasıysa ve YENİ ders adları getiriyorsa ekliyoruz.
+                onceki = idx
+                for sonraki in adaylar[sira + 1:]:
+                    if sonraki != onceki + 1 or sonraki >= len(pdf.pages):
+                        break
+                    ek = _coz(_sayfa_ikilileri(pdf.pages[sonraki]),
+                              pdf.pages[sonraki].extract_words())
+                    if not ek or any(d in cevaplar for d in ek):
+                        break
+                    cevaplar.update(ek)
+                    onceki = sonraki
                 _adet = ", ".join(f"{d}: {len(v)}" for d, v in cevaplar.items())
                 return cevaplar, idx, f"Keşfedildi ({_adet})"
+
+    # --- OCR YEDEGI ---------------------------------------------------
+    # ONEMLI: "PDF'i tara" dugmesi buraya geliyor. Cevap anahtari sayfaya
+    # YAZI olarak degil CIZIM olarak gomulmusse (2016 KPSS Lisans boyle)
+    # yukaridaki metin taramasi o sayfayi hic goremez -- sayfada yazi yok.
+    # Bu durumda sayfayi resme cevirip okuyoruz; ders BASLIKLARI da ayni
+    # OCR ciktisindan geldigi icin "Genel Yetenek / Genel Kultur" adlari
+    # da dogru bulunuyor.
+    if _ocr_var_mi():
+        try:
+            with pdfplumber.open(pdf_yolu) as pdf:
+                n = len(pdf.pages)
+                bos = [i for i in range(max(0, n - 6), n)
+                       if len((pdf.pages[i].extract_text() or "").strip()) < 200]
+        except Exception:
+            bos = []
+        for idx in reversed(bos[-3:]):
+            ikililer, kelimeler = _ocr_sayfa(pdf_yolu, idx)
+            cevaplar = _coz(ikililer, kelimeler)
+            if cevaplar:
+                _adet = ", ".join(f"{d}: {len(v)}" for d, v in cevaplar.items())
+                return cevaplar, idx, f"Keşfedildi — resimden okundu ({_adet})"
+
+    if not adaylar:
+        return None, None, "Cevap anahtarı sayfası bulunamadı."
     return None, adaylar[0], "Cevap anahtarı sayfasındaki sütunlar çözülemedi."
 
 
