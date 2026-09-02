@@ -17,3 +17,8 @@ google-api-python-client>=2.100
 google-auth-httplib2>=0.2
 google-auth-oauthlib>=1.2
 pikepdf>=8.0         # PDF'lerdeki ÖSYM/MEB filigranını (damga katmanını) kayıpsız silmek için
+
+# Cevap anahtarı sayfası PDF'e YAZI olarak değil ÇİZİM/RESİM olarak
+# gömülmüşse (ör. 2016 KPSS Lisans kitapçığı) sayfayı resimden okumak
+# için. Yanında packages.txt'teki 'tesseract-ocr' de gerekir.
+pytesseract>=0.3.10

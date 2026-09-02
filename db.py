@@ -22,7 +22,7 @@ from datetime import datetime
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lgs_platform.db")
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-09-02.1"
+SURUM = "2026-09-02.3"
 
 DEFAULT_CATEGORIES = [
     "8. Sınıf (LGS)",
@@ -74,7 +74,20 @@ class _PgCursor:
 
     def __init__(self, owner):
         self._owner = owner
-        self._cur = owner._raw().cursor()
+        # ÖNEMLİ - ARADA BİR ÇIKAN HATA: Supabase, uzun süre kullanılmayan
+        # bağlantıyı kendi tarafından kapatıyor. Bizim tarafımızda bağlantı
+        # hâlâ "açık" göründüğü için hata execute'ta değil, DAHA ÖNCE,
+        # imleç açılırken patlıyordu -- ve oradaki yeniden bağlanma
+        # koruması devreye girmiyordu. Bu yüzden burada da bir kez yeniden
+        # bağlanıp deniyoruz. (Kullanıcıya yansıması: program bir süre
+        # kullanılmadan bekletilip tekrar dokunulduğunda kırmızı hata.)
+        try:
+            self._cur = owner._raw().cursor()
+        except Exception as e:
+            if not _baglanti_kopmus(e):
+                raise
+            owner._reset()
+            self._cur = owner._raw().cursor()
 
     def execute(self, sql, params=()):
         try:

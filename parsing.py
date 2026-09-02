@@ -23,7 +23,7 @@ import tempfile
 import pdfplumber
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-09-02.1"
+SURUM = "2026-09-02.3"
 from PyPDF2 import PdfReader, PdfWriter
 
 try:
@@ -249,7 +249,9 @@ def extract_answer_key(pdf_file_or_path, section_subjects, search_last_n_pages=2
     try:
         sonuc, mesaj, idx = cevap_anahtari_bul(yol, section_subjects)
         if sonuc is not None:
-            return sonuc, "OK", idx
+            # "OK-OCR" = anahtar resimden (OCR ile) okundu; ekranda
+            # kullaniciya gozden gecirmesi soylenir.
+            return sonuc, ("OK-OCR" if mesaj == "OK-OCR" else "OK"), idx
         return None, f"{son_hata} (Esnek okuma da denendi: {mesaj})", idx
     except Exception as e:
         return None, f"{son_hata} (Esnek okuma hatası: {e})", None
@@ -358,6 +360,30 @@ def _oc_katmani_var(nesne, derinlik=0):
     return False
 
 
+def _damga_blogu_mu(islem):
+    """Bu 'BDC' komutu bir FİLİGRAN bloğunu mu açıyor?
+
+    PDF standardında sayfaya sonradan basılan damgalar
+        /Artifact <</Subtype /Watermark /Type /Pagination>> BDC ... EMC
+    şeklinde işaretlenir. ÖSYM'nin KPSS Lisans kitapçıkları damgayı tam
+    olarak böyle koyuyor (ölçüldü: 2015-2021 arası yedi kitapçığın
+    hepsinde). Bu işaret standart olduğu için, başka yayınevlerinin
+    kitapçıklarında da aynı şekilde yakalanır -- yani her PDF'e ayrı kod
+    yazmak gerekmez."""
+    try:
+        if str(islem.operator) != "BDC" or len(islem.operands) < 2:
+            return False
+        ozellik = islem.operands[1]
+        try:
+            if str(ozellik.get("/Subtype")) == "/Watermark":
+                return True
+        except Exception:
+            pass
+        return str(ozellik) == "/Watermark"
+    except Exception:
+        return False
+
+
 def filigrani_kaldir(yol, cikis=None):
     """PDF sayfalarındaki FİLİGRANI (ÖSYM/MEB damgası) siler.
 
@@ -385,31 +411,56 @@ def filigrani_kaldir(yol, cikis=None):
     try:
         for sayfa in pdf.pages:
             kaynak = sayfa.get("/Resources")
-            if not kaynak or "/XObject" not in kaynak:
-                continue
             try:
                 kutu = [float(x) for x in sayfa.MediaBox]
                 sayfa_alani = abs((kutu[2] - kutu[0]) * (kutu[3] - kutu[1]))
             except Exception:
-                continue
-            hedefler = [
-                ad for ad, ob in kaynak["/XObject"].items()
-                if _filigran_formu_mu(ob, sayfa_alani)
-            ]
-            if not hedefler:
-                continue
+                sayfa_alani = 0
+            hedefler = []
+            if kaynak and "/XObject" in kaynak and sayfa_alani:
+                hedefler = [
+                    ad for ad, ob in kaynak["/XObject"].items()
+                    if _filigran_formu_mu(ob, sayfa_alani)
+                ]
             try:
                 kalanlar = []
+                icerideyiz = False   # /Watermark blogunun icinde miyiz
+                ic_sayac = 0         # blok icindeki ic ice isaretler
+                sayfada = 0
                 for islem in pikepdf.parse_content_stream(sayfa):
-                    if (str(islem.operator) == "Do" and islem.operands
+                    op = str(islem.operator)
+                    if icerideyiz:
+                        # Blok bitene kadar HER SEY atilir (damganin kendi
+                        # q/Q'lari da blogun icinde dengeli oldugu icin
+                        # sayfanin geri kalani bundan etkilenmez).
+                        if op in ("BDC", "BMC"):
+                            ic_sayac += 1
+                        elif op == "EMC":
+                            if ic_sayac:
+                                ic_sayac -= 1
+                            else:
+                                icerideyiz = False
+                        continue
+                    if _damga_blogu_mu(islem):
+                        icerideyiz = True
+                        ic_sayac = 0
+                        sayfada += 1
+                        continue
+                    if (op == "Do" and hedefler and islem.operands
                             and str(islem.operands[0]) in hedefler):
-                        silinen += 1
+                        sayfada += 1
                         continue
                     kalanlar.append(islem)
+                if not sayfada:
+                    continue
+                silinen += sayfada
                 sayfa.Contents = pdf.make_stream(
                     pikepdf.unparse_content_stream(kalanlar))
                 for ad in hedefler:
-                    del kaynak["/XObject"][ad]
+                    try:
+                        del kaynak["/XObject"][ad]
+                    except Exception:
+                        pass
             except Exception:
                 continue
         if silinen:
@@ -497,28 +548,73 @@ def gorsel_kucult(yol, dpi=110, kalite=58, sinir=None):
 _IKILI = re.compile(r"^(\d{1,3})[\.\)]?$")
 
 
+def _rakam_kutusu(w):
+    """Bastaki harf(ler) atildiktan sonra kalan rakamlarin kutusu.
+
+    Damga harfi devasa oldugu icin kelimenin kutusu (x0/x1/top) tamamen
+    damganin kutusu olur; numaranin gercek yeri ancak harf harf bakilarak
+    bulunur. Harf bilgisi yoksa None doner.
+    """
+    kalan = [c for c in (w.get("chars") or [])]
+    while kalan and not (kalan[0].get("text") or "").isdigit():
+        kalan.pop(0)
+    kalan = [c for c in kalan if (c.get("text") or "") not in ("",)]
+    if not kalan:
+        return None
+    return (min(c["x0"] for c in kalan),
+            max(c["x1"] for c in kalan),
+            min(c["top"] for c in kalan))
+
+
 def _sayfa_ikilileri(page):
     """Sayfadaki (soru_no, harf) ikililerini koordinatlariyla dondurur."""
-    words = page.extract_words()
+    try:
+        words = page.extract_words(return_chars=True)
+    except TypeError:          # eski pdfplumber
+        words = page.extract_words()
     numtoks, lettoks = [], []
     for w in words:
         txt = (w["text"] or "").strip()
+        x0, x1, ust = w["x0"], w["x1"], w["top"]
+        # ÖNEMLİ - ÖSYM DAMGASI: Kitapçık sayfalarının üstüne büyük gri
+        # "Ö S Y M" harfleri basılı. Bu harfler cevap anahtarı sayfasında
+        # bir soru numarasının tam üstüne denk geldiğinde metin olarak
+        # numaraya YAPIŞIYOR: "53." yerine "M53." okunuyor ve o cevap
+        # kayboluyor. (Ölçüldü: 2015 KPSS kitapçığında her sayfada tam
+        # bir cevap böyle düşüyor, 60 yerine 59 bulunuyordu ve anahtarın
+        # tamamı reddediliyordu.) Numaranın önüne yapışmış harfi atıyoruz.
+        # Kutuyu da düzeltmek ŞART: damga harfi kocaman olduğu için
+        # kelimenin sağ kenarı (x1) 200 punto ötede kalıyor ve cevap harfi
+        # "yanında" sayılmıyordu.
+        if txt and txt[0].isalpha() and len(txt) > 1 and txt[1].isdigit():
+            kutu = _rakam_kutusu(w)
+            if kutu is None:
+                continue
+            txt = re.sub(r"^\D+", "", txt)
+            x0, x1, ust = kutu
         m = _IKILI.match(txt)
         if m:
             n = int(m.group(1))
             if 1 <= n <= 200:
-                numtoks.append({"x0": w["x0"], "x1": w["x1"], "top": w["top"], "num": n})
+                numtoks.append({"x0": x0, "x1": x1, "top": ust, "num": n})
             continue
         if re.fullmatch(r"[A-Ea-e]", txt):
-            lettoks.append({"x0": w["x0"], "top": w["top"], "letter": txt.upper()})
+            lettoks.append({"x0": x0, "top": ust, "letter": txt.upper()})
             continue
         # "12.C" gibi bitisik yazimlar
         m2 = re.fullmatch(r"(\d{1,3})[\.\)\-]\s*([A-Ea-e])", txt)
         if m2:
             n = int(m2.group(1))
             if 1 <= n <= 200:
-                numtoks.append({"x0": w["x0"], "x1": w["x1"], "top": w["top"], "num": n})
-                lettoks.append({"x0": w["x1"], "top": w["top"], "letter": m2.group(2).upper()})
+                numtoks.append({"x0": x0, "x1": x1, "top": ust, "num": n})
+                lettoks.append({"x0": x1, "top": ust, "letter": m2.group(2).upper()})
+    return _ikilileri_esle(numtoks, lettoks)
+
+
+def _ikilileri_esle(numtoks, lettoks):
+    """Her soru numarasina, aynı satirda hemen SAGINDAKI harfi eslestirir.
+    (Hem PDF metninden hem OCR'dan gelen token'lar icin ortak kullanilir;
+    koordinatlar her iki durumda da 'punto' biriminde olmali.)"""
     ikililer = []
     for nt in numtoks:
         aday = [
@@ -531,6 +627,116 @@ def _sayfa_ikilileri(page):
         ikililer.append({"num": nt["num"], "harf": aday[0]["letter"],
                          "x": nt["x0"], "top": nt["top"]})
     return ikililer
+
+
+# ---------------------------------------------------------------------
+#  METNI OLMAYAN CEVAP ANAHTARI SAYFALARI (OCR YEDEGI)
+# ---------------------------------------------------------------------
+# ONEMLI - GERCEK ORNEK: 2016 KPSS Lisans kitapciginin son sayfasindaki
+# cevap anahtari, PDF'e YAZI olarak degil CIZIM (vektor egri) olarak
+# gomulmus -- sayfada 692 egri var, 4 karakter yazi var. Yani metin
+# okuyan hicbir yontem o sayfayi goremiyor; kitapcikta "cevap anahtari
+# yok" saniliyordu. Ayni durum taranmis (fotokopi) kitapciklarda da olur.
+#
+# Cozum: sayfayi 300 dpi resme cevirip OCR ile okumak. Once esikleme
+# yapiliyor (acik gri ÖSYM damgasi tamamen atiliyor, siyah yazi kaliyor);
+# bu, OCR'in dogrulugunu belirgin sekilde artiriyor. Sonuc yine
+# koordinatli token'lara cevrilip normal yolla eslestiriliyor, boylece
+# sutunlu duzenler de dogru okunuyor.
+#
+# OCR yalnizca metinle HIC sonuc alinamadiginda devreye girer; okunan
+# anahtar "OCR" etiketiyle donduruldugu icin ekranda kullaniciya
+# "gozden gecirin" uyarisi gosterilir.
+
+def _ocr_var_mi():
+    """Tesseract kurulu mu? (Streamlit Cloud icin packages.txt'te var.)"""
+    try:
+        import pytesseract  # noqa: F401
+    except Exception:
+        return False
+    return shutil.which("tesseract") is not None
+
+
+def _ocr_ikilileri(pdf_yolu, idx, dpi=300, hedef=0):
+    """Bir sayfayi OCR ile okuyup (soru_no, harf) ikililerini dondurur.
+
+    hedef verilirse (beklenen cevap sayisi), o sayiya ulasan ilk kip
+    yeterli sayilir -- gereksiz OCR turu yapilmaz, islem hizlanir."""
+    if not _ocr_var_mi():
+        return []
+    try:
+        import pypdfium2 as pdfium
+        import pytesseract
+    except Exception:
+        return []
+    try:
+        doc = pdfium.PdfDocument(pdf_yolu)
+        try:
+            _s = doc[idx]
+            resim = _s.render(scale=dpi / 72.0).to_pil().convert("L")
+            try:
+                _s.close()
+            except Exception:
+                pass
+        finally:
+            doc.close()
+    except Exception:
+        return []
+    # Acik gri damgayi at, siyah yaziyi birak.
+    try:
+        resim = resim.point(lambda p: 0 if p < 110 else 255).convert("L")
+    except Exception:
+        return []
+    olcek = 72.0 / dpi
+    # ONEMLI: Tesseract'in sayfa duzeni modu sonucu belirgin degistiriyor.
+    # Olculdu (2016 KPSS anahtar sayfasi, 4 sutun): psm 6 -> 119 ikili,
+    # psm 4 -> 120 (tam). Tek moda guvenmeyip en cok ikili vereni
+    # seciyoruz; boylece baska duzenlerde de en iyi sonuc aliniyor.
+    en_iyi = []
+    for kip in ("--psm 4", "--psm 6", "--psm 3"):
+        try:
+            veri = pytesseract.image_to_data(
+                resim, config=kip, output_type=pytesseract.Output.DICT)
+        except Exception:
+            continue
+        numtoks, lettoks = [], []
+        for i, ham in enumerate(veri.get("text", [])):
+            txt = (ham or "").strip()
+            if not txt:
+                continue
+            try:
+                x0 = veri["left"][i] * olcek
+                x1 = (veri["left"][i] + veri["width"][i]) * olcek
+                ust = veri["top"][i] * olcek
+            except Exception:
+                continue
+            m = _IKILI.match(txt)
+            if m:
+                n = int(m.group(1))
+                if 1 <= n <= 200:
+                    numtoks.append({"x0": x0, "x1": x1, "top": ust, "num": n})
+                continue
+            # OCR cevap harfinin yanina cerçöp ekleyebiliyor ("£E", "E.",
+            # "(A)"); tek bir A-E harfi kaldigi surece kabul ediyoruz.
+            h = re.fullmatch(r"[^A-Za-z0-9]*([A-Ea-e])[^A-Za-z0-9]*", txt)
+            if h:
+                lettoks.append({"x0": x0, "top": ust, "letter": h.group(1).upper()})
+                continue
+            m2 = re.fullmatch(r"(\d{1,3})[^A-Za-z0-9]*([A-Ea-e])", txt)
+            if m2:
+                n = int(m2.group(1))
+                if 1 <= n <= 200:
+                    numtoks.append({"x0": x0, "x1": x1, "top": ust, "num": n})
+                    lettoks.append({"x0": x1, "top": ust,
+                                    "letter": m2.group(2).upper()})
+        sonuc = _ikilileri_esle(numtoks, lettoks)
+        if len(sonuc) > len(en_iyi):
+            en_iyi = sonuc
+        if hedef and len(en_iyi) >= hedef:
+            break          # aranan sayiya ulasildi, digerlerine gerek yok
+        if len(en_iyi) >= 20 and kip == "--psm 6":
+            break          # iki kip yetti, ucuncuye gerek yok
+    return en_iyi
 
 
 def _duzgunluk(diziler):
@@ -660,6 +866,56 @@ def cevap_anahtari_bul(pdf_yolu, subjects, tara=14):
                 sonuc = _bloklara_ayir(birikmis, subjects)
                 if sonuc and all(len(v) == c for (s, c), v in zip(subjects, [sonuc[s] for s, _ in subjects])):
                     return sonuc, "OK", ilk
+
+    # --- Metinle olmadi: OCR yedegi (bkz. yukaridaki uzun aciklama) ---
+    # Sadece metni ÇOK AZ olan sayfalar taranir; yazisi olan bir sayfayi
+    # OCR ile yeniden okumanin faydasi yok, sadece yavaslatir.
+    if _ocr_var_mi():
+        try:
+            with pdfplumber.open(pdf_yolu) as pdf:
+                n = len(pdf.pages)
+                bos = [i for i in range(max(0, n - 6), n)
+                       if len((pdf.pages[i].extract_text() or "").strip()) < 200]
+                # OCR sayfa basina ~7 sn; hic bulunamayacak bir dosyada
+                # kullaniciyi dakikalarca bekletmemek icin en fazla 3 sayfa.
+                bos = bos[-3:]
+        except Exception:
+            bos = []
+        onbellek = {}
+
+        def _ocr_oku(i):
+            if i not in onbellek:
+                onbellek[i] = _okuma_sirasi(
+                    _ocr_ikilileri(pdf_yolu, i, hedef=toplam_soru))
+            return onbellek[i]
+
+        def _uyar_mi(veri):
+            cikti = _bloklara_ayir(veri, subjects)
+            if cikti and all(len(v) == c for (s, c), v in
+                             zip(subjects, [cikti[s] for s, _ in subjects])):
+                return cikti
+            return None
+
+        # OCR yavas (sayfa basina ~20 sn). Cevap anahtari neredeyse her
+        # zaman SON sayfada oldugu icin once sondan basa TEK sayfa
+        # deniyoruz; genelde ilk denemede bulunuyor ve digerleri hic
+        # taranmiyor.
+        for idx in reversed(bos):
+            tek = _ocr_oku(idx)
+            if len(tek) >= toplam_soru:
+                cikti = _uyar_mi(tek)
+                if cikti:
+                    return cikti, "OK-OCR", idx
+        # Anahtar birden fazla sayfaya yayilmissa: ardisik sayfalari birlestir.
+        for bas in range(len(bos)):
+            birikmis, ilk = [], bos[bas]
+            for idx in bos[bas:bas + 3]:
+                birikmis += _ocr_oku(idx)
+                if len(birikmis) < toplam_soru:
+                    continue
+                cikti = _uyar_mi(birikmis)
+                if cikti:
+                    return cikti, "OK-OCR", ilk
     return None, (
         f"Cevap anahtarı sayfası bulundu ama {toplam_soru} cevap "
         f"eşleştirilemedi. PDF'in düzeni beklenenden farklı."

@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-09-02.1"
+SURUM = "2026-09-02.3"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -3809,7 +3809,21 @@ if st.session_state.is_admin and aktif_bolum == SEK_ADMIN:
                     key="gen_autotry"):
                 key, msg, idx = parsing.extract_answer_key(uploaded, subject_rows)
                 if key:
-                    st.success("Cevap anahtarı otomatik okundu ✅")
+                    if msg == "OK-OCR":
+                        # Anahtar sayfası PDF'e yazı olarak değil ÇİZİM/RESİM
+                        # olarak gömülmüş; harfler resimden (OCR) okundu.
+                        # Neredeyse her zaman doğru çıkıyor ama %100 değil,
+                        # bu yüzden kullanıcıdan göz gezdirmesini istiyoruz.
+                        st.warning(
+                            "Cevap anahtarı bu kitapçığa yazı olarak değil resim "
+                            "olarak gömülmüş; harfler resimden okundu (OCR). "
+                            "Kaydetmeden önce aşağıdaki cevaplara bir göz atın."
+                        )
+                        st.caption(" · ".join(
+                            f"**{_ad}:** " + "".join(key.get(_ad, []))
+                            for _ad, _c in subject_rows))
+                    else:
+                        st.success("Cevap anahtarı otomatik okundu ✅")
                     parsed_key = {"Genel": key}
                     _kes_sayfa = idx
                 else:
