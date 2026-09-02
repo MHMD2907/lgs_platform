@@ -85,7 +85,7 @@ def _ham_dosyalari_temizle():
 # Artık uygulama, açılır açılmaz yanındaki dosyaların sürümünü kontrol ediyor
 # ve eksik olan varsa ÇÖKMEK YERİNE ne yapılması gerektiğini Türkçe yazıyor.
 # app.py'nin beklediği sürüm. Yardımcı dosyalar aynı sürümü taşımalı.
-SURUM = "2026-08-27.7"
+SURUM = "2026-08-27.8"
 
 _GEREKLI_PARCALAR = [
     ("db.py", db, ["pdf_kaydet", "pdf_getir", "pdf_saklananlar",
@@ -1807,38 +1807,49 @@ if os.path.exists(_SIMGE_YOLU):
     // sonradan tekrar eklenirse diye izlemeye devam ediyoruz.
     var kelimeler = ['manage app', 'uygulamayı yönet', 'uygulamayi yonet',
                      'made with streamlit', 'streamlit ile yapıldı'];
-    function temizle() {
+    // ÖNEMLİ - EKRANDA KIRMIZI HATA ÇIKMASI: Bu temizlik ilk sürümde
+    // sayfadaki HER değişiklikte, TÜM düğme ve bağlantıları tarayarak
+    // çalışıyordu. Streamlit ekranı saniyede onlarca kez güncellediği
+    // için tarayıcı yetişemiyor ve Streamlit'in kendi çizim düzeni
+    // bozulup "removeChild" hatası veriyordu. Artık:
+    //   - yalnızca hedef seçicilere bakılıyor (tüm sayfa taranmıyor),
+    //   - yazıya göre arama sadece ilk birkaç saniye yapılıyor,
+    //   - değişiklik izleyicisi saniyede en fazla bir kez tetikleniyor.
+    function gizle(x) {
+      if (x && x.style && x.style.display !== 'none') { x.style.display = 'none'; }
+    }
+    function temizle(derin) {
       try {
         var hedefler = b.querySelectorAll(
           '#ManageAppButton, [data-testid="manage-app-button"],' +
           '[class*="viewerBadge"], [class*="profileContainer"],' +
           'a[href*="share.streamlit.io"], a[href*="streamlit.io/cloud"]');
-        for (var i = 0; i < hedefler.length; i++) {
-          hedefler[i].style.display = 'none';
-        }
-        var hepsi = b.querySelectorAll('button, a, div[role="button"]');
-        for (var j = 0; j < hepsi.length; j++) {
-          var t = (hepsi[j].textContent || '').trim().toLowerCase();
-          if (!t || t.length > 40) { continue; }
-          for (var k = 0; k < kelimeler.length; k++) {
-            if (t.indexOf(kelimeler[k]) !== -1) {
-              var kutu = hepsi[j].closest('div') || hepsi[j];
-              kutu.style.display = 'none';
-              break;
+        for (var i = 0; i < hedefler.length; i++) { gizle(hedefler[i]); }
+        if (derin) {
+          var hepsi = b.querySelectorAll('a, button');
+          for (var j = 0; j < hepsi.length; j++) {
+            var t = (hepsi[j].textContent || '').trim().toLowerCase();
+            if (!t || t.length > 40) { continue; }
+            for (var k = 0; k < kelimeler.length; k++) {
+              if (t.indexOf(kelimeler[k]) !== -1) { gizle(hepsi[j]); break; }
             }
           }
         }
         manifestiKur();
       } catch (e) { /* sessizce geç */ }
     }
-    temizle();
+    temizle(true);
     var sayac = 0;
     var zaman = setInterval(function () {
-      temizle();
-      if (++sayac > 20) { clearInterval(zaman); }
-    }, 500);
+      temizle(sayac < 6);
+      if (++sayac > 12) { clearInterval(zaman); }
+    }, 700);
     if (window.MutationObserver) {
-      new MutationObserver(temizle).observe(b.body, {childList: true, subtree: true});
+      var bekle = null;
+      new MutationObserver(function () {
+        if (bekle) { return; }
+        bekle = setTimeout(function () { bekle = null; temizle(false); }, 1000);
+      }).observe(b.body, {childList: true});
     }
 
     // ---------------------------------------------------------------
