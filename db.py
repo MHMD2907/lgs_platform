@@ -22,7 +22,7 @@ from datetime import datetime
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lgs_platform.db")
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-09-22.1"
+SURUM = "2026-09-22.2"
 
 DEFAULT_CATEGORIES = [
     "8. Sınıf (LGS)",
@@ -356,7 +356,16 @@ def _insert_id(c, sql, params):
 
 @_yazma
 def init_db():
-    _sema_kur(get_conn())
+    # ÖNEMLİ - SALT OKUNUR VERİTABANI: Ücretsiz plandaki 500 MB sınırı
+    # aşılınca Supabase veritabanını salt okunur yapıyor. O durumda tablo
+    # kurma komutları (tablolar zaten var olsa bile) hata veriyor ve
+    # program HİÇ açılmıyordu. Artık açılıyor; sadece yeni kayıt
+    # yapılamıyor, sebebi de ekranda söyleniyor (bkz. salt_okunur_mu).
+    try:
+        _sema_kur(get_conn())
+    except Exception as e:
+        if not _salt_okunur_hatasi(e):
+            raise
 
     # Eski kurulumlarda bozuk yazımla ("EMİR" -> "emi̇r") kaydedilmiş
     # kullanıcı adlarını yeni standarda taşı. Düzeltilecek bir şey yoksa
@@ -503,6 +512,17 @@ def _sema_kur(conn):
         """CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
+        )"""
+    )
+    # PDF'lerin DOSYA DEPOSUNDAKİ yeri (bkz. "PDF DOSYA DEPOSU" bölümü).
+    # Burada sadece küçük bir künye tutulur; PDF'in kendisi depodadır.
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS pdf_depo (
+            exam_id INTEGER PRIMARY KEY,
+            filename TEXT NOT NULL,
+            yol TEXT NOT NULL,
+            boyut INTEGER NOT NULL,
+            created_at TEXT NOT NULL
         )"""
     )
 
@@ -1079,6 +1099,12 @@ def delete_exam(exam_id):
         conn.execute("DELETE FROM exam_files WHERE exam_id = ?", (exam_id,))
     except Exception:
         pass  # eski veritabanlarında bu tablo olmayabilir
+    try:
+        conn.execute("DELETE FROM pdf_depo WHERE exam_id = ?", (exam_id,))
+    except Exception:
+        pass
+    if depo_hazir_mi():
+        depo_sil(_depo_yol(exam_id))
     # ÖNEMLİ: Denemeye ait ÇÖZÜM KAYITLARI da silinir. Eskiden bunlar
     # kalıyordu; "Gelişim Raporum" sayfasında adı okunamayan, açılmayan
     # hayalet satırlar olarak görünüyorlardı.
@@ -1324,20 +1350,44 @@ PDF_SAKLAMA_SINIRI = 30 * 1024 * 1024  # 30 MB'tan büyük dosyalar saklanmaz
 
 @_yazma
 def pdf_kaydet(exam_id, filename, data):
-    """Bir denemenin PDF'ini veritabanına yazar (varsa üzerine)."""
+    """Bir denemenin PDF'ini saklar (varsa üzerine).
+
+    Dosya deposu ayarlıysa (SUPABASE_KEY) PDF depoya gider, veritabanına
+    sadece künyesi yazılır. Değilse eskisi gibi veritabanına yazılır."""
     if not data:
         return False, "Dosya boş."
     if len(data) > PDF_SAKLAMA_SINIRI:
         return False, (
-            f"Dosya {len(data) / 1e6:.0f} MB; veritabanında saklamak için çok büyük "
+            f"Dosya {len(data) / 1e6:.0f} MB; saklamak için çok büyük "
             f"(sınır {PDF_SAKLAMA_SINIRI / 1e6:.0f} MB)."
         )
+    zaman = datetime.now().isoformat(timespec="seconds")
+    if depo_hazir_mi():
+        yol = _depo_yol(exam_id)
+        try:
+            depo_yukle(yol, data)
+        except Exception as e:
+            return False, f"PDF dosya deposuna yüklenemedi ({e})."
+        conn = get_conn()
+        conn.execute("DELETE FROM pdf_depo WHERE exam_id = ?", (exam_id,))
+        conn.execute(
+            """INSERT INTO pdf_depo (exam_id, filename, yol, boyut, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (exam_id, filename, yol, len(data), zaman),
+        )
+        try:   # eski usulle veritabanında kalmış kopyası varsa yer kaplamasın
+            conn.execute("DELETE FROM exam_files WHERE exam_id = ?", (exam_id,))
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+        return True, None
     conn = get_conn()
     conn.execute("DELETE FROM exam_files WHERE exam_id = ?", (exam_id,))
     conn.execute(
         """INSERT INTO exam_files (exam_id, filename, data, boyut, created_at)
            VALUES (?, ?, ?, ?, ?)""",
-        (exam_id, filename, data, len(data), datetime.now().isoformat(timespec="seconds")),
+        (exam_id, filename, data, len(data), zaman),
     )
     conn.commit()
     conn.close()
@@ -1345,8 +1395,22 @@ def pdf_kaydet(exam_id, filename, data):
 
 
 def pdf_getir(exam_id):
-    """Denemenin PDF içeriğini veritabanından okur; yoksa None."""
+    """Denemenin PDF içeriği: önce dosya deposundan, yoksa veritabanından.
+    Döner: (dosya_adi, bayt) ya da (None, None)."""
     conn = get_conn()
+    kunye = None
+    try:
+        kunye = conn.execute(
+            "SELECT filename, yol FROM pdf_depo WHERE exam_id = ?", (exam_id,)
+        ).fetchone()
+    except Exception:
+        kunye = None
+    if kunye and depo_hazir_mi():
+        conn.close()
+        veri = depo_indir(kunye["yol"])
+        if veri:
+            return kunye["filename"], veri
+        conn = get_conn()
     row = conn.execute(
         "SELECT filename, data FROM exam_files WHERE exam_id = ?", (exam_id,)
     ).fetchone()
@@ -1364,22 +1428,185 @@ def pdf_getir(exam_id):
 
 @_onbellekli
 def pdf_saklananlar():
-    """Hangi denemelerin PDF'i veritabanında duruyor: {exam_id: boyut}"""
+    """Hangi denemelerin PDF'i saklanıyor (depoda ya da veritabanında):
+    {exam_id: boyut}"""
     conn = get_conn()
-    try:
-        rows = conn.execute("SELECT exam_id, boyut FROM exam_files").fetchall()
-    except Exception:
-        rows = []
+    sonuc = {}
+    for sql in ("SELECT exam_id, boyut FROM exam_files",
+                "SELECT exam_id, boyut FROM pdf_depo"):
+        try:
+            for r in conn.execute(sql).fetchall():
+                sonuc[r["exam_id"]] = r["boyut"]
+        except Exception:
+            pass
     conn.close()
-    return {r["exam_id"]: r["boyut"] for r in rows}
+    return sonuc
 
 
 @_yazma
 def pdf_sil(exam_id):
     conn = get_conn()
     conn.execute("DELETE FROM exam_files WHERE exam_id = ?", (exam_id,))
+    try:
+        conn.execute("DELETE FROM pdf_depo WHERE exam_id = ?", (exam_id,))
+    except Exception:
+        pass
     conn.commit()
     conn.close()
+    if depo_hazir_mi():
+        depo_sil(_depo_yol(exam_id))
+
+
+# =====================================================================
+#  PDF DOSYA DEPOSU (Supabase Storage)
+#
+#  NEDEN: PDF'ler eskiden veritabanının İÇİNDE saklanıyordu. 153 test
+#  PDF'i ~553 MB tuttu ve veritabanı ücretsiz plandaki 500 MB sınırını
+#  aştı (ölçüldü: 622 / 500 MB). Sınır aşılınca Supabase veritabanını
+#  "salt okunur" yapıyor: yeni sınav sonucu KAYDEDİLEMİYOR.
+#
+#  Supabase'in veritabanından AYRI, ücretsiz 1 GB'lık bir dosya deposu
+#  var ve hiç kullanılmıyordu. PDF'ler artık oraya gidiyor; veritabanında
+#  sadece her PDF'in küçük bir künyesi (pdf_depo tablosu) kalıyor.
+#
+#  Gereken ayar: Streamlit Secrets'ta ve .streamlit/secrets.toml'da
+#      SUPABASE_KEY = "..."   (Supabase > Project Settings > API Keys >
+#                              "secret" ya da "service_role" anahtarı)
+#  Proje adresi (https://<kod>.supabase.co) DB_URL'den kendiliğinden
+#  bulunur; istenirse SUPABASE_URL ile ayrıca da verilebilir.
+#  Anahtar yoksa her şey eskisi gibi veritabanıyla çalışır.
+# =====================================================================
+DEPO_KOVA = "pdfler"
+
+
+def _gizli(ad):
+    deger = os.environ.get(ad)
+    if deger:
+        return deger.strip()
+    try:
+        import streamlit as st
+        return (st.secrets.get(ad) or "").strip() or None
+    except Exception:
+        return None
+
+
+def _proje_adresi():
+    """DB_URL içindeki proje kodundan https://<kod>.supabase.co üretir."""
+    url = _db_url() or ""
+    m = (re.search(r"postgres\.([a-z0-9]{10,40})[:@]", url)
+         or re.search(r"db\.([a-z0-9]{10,40})\.supabase\.co", url))
+    return f"https://{m.group(1)}.supabase.co" if m else None
+
+
+def _depo_ayar():
+    """(proje_adresi, anahtar) ya da None (depo ayarlı değilse)."""
+    anahtar = _gizli("SUPABASE_KEY")
+    if not anahtar or not _db_url():
+        return None
+    adres = _gizli("SUPABASE_URL") or _proje_adresi()
+    if not adres:
+        return None
+    return adres.rstrip("/"), anahtar
+
+
+def depo_hazir_mi():
+    return _depo_ayar() is not None
+
+
+def _depo_yol(exam_id):
+    return f"sinav_{int(exam_id)}.pdf"
+
+
+def _depo_basliklar(anahtar, ek=None):
+    # Supabase'in yeni "sb_secret_..." anahtarları SADECE apikey başlığıyla
+    # kabul ediliyor; eski "service_role" anahtarı (eyJ... ile başlar) ise
+    # Authorization başlığını da istiyor. İkisini de destekliyoruz.
+    b = {"apikey": anahtar}
+    if anahtar.startswith("eyJ"):
+        b["Authorization"] = f"Bearer {anahtar}"
+    if ek:
+        b.update(ek)
+    return b
+
+
+def depo_kova_olustur():
+    """PDF kovasını (yoksa) oluşturur. Gizli (herkese açık DEĞİL)."""
+    import requests
+    adres, anahtar = _depo_ayar()
+    r = requests.post(
+        f"{adres}/storage/v1/bucket", headers=_depo_basliklar(anahtar),
+        json={"id": DEPO_KOVA, "name": DEPO_KOVA, "public": False}, timeout=30,
+    )
+    if r.status_code in (200, 201):
+        return True
+    metin = (r.text or "").lower()
+    if "exist" in metin or "duplicate" in metin:
+        return True
+    raise RuntimeError(f"Dosya deposu açılamadı (HTTP {r.status_code}: {r.text[:200]})")
+
+
+def depo_yukle(yol, veri):
+    import requests
+    adres, anahtar = _depo_ayar()
+    r = requests.post(
+        f"{adres}/storage/v1/object/{DEPO_KOVA}/{yol}",
+        headers=_depo_basliklar(anahtar, {"Content-Type": "application/pdf",
+                                          "x-upsert": "true"}),
+        data=veri, timeout=600,
+    )
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+
+
+def depo_indir(yol):
+    import requests
+    adres, anahtar = _depo_ayar()
+    try:
+        r = requests.get(f"{adres}/storage/v1/object/{DEPO_KOVA}/{yol}",
+                         headers=_depo_basliklar(anahtar), timeout=600)
+    except Exception:
+        return None
+    return r.content if r.status_code == 200 and r.content else None
+
+
+def depo_sil(yol):
+    import requests
+    try:
+        adres, anahtar = _depo_ayar()
+        requests.delete(f"{adres}/storage/v1/object/{DEPO_KOVA}",
+                        headers=_depo_basliklar(anahtar),
+                        json={"prefixes": [yol]}, timeout=30)
+    except Exception:
+        pass
+
+
+def depo_listesi():
+    """Depodaki dosyalar: {ad: boyut}. (Taşımanın doğrulanması için.)"""
+    import requests
+    adres, anahtar = _depo_ayar()
+    sonuc, atla = {}, 0
+    while True:
+        r = requests.post(
+            f"{adres}/storage/v1/object/list/{DEPO_KOVA}",
+            headers=_depo_basliklar(anahtar),
+            json={"prefix": "", "limit": 1000, "offset": atla,
+                  "sortBy": {"column": "name", "order": "asc"}},
+            timeout=60,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"Depo listelenemedi (HTTP {r.status_code})")
+        parca = r.json() or []
+        for o in parca:
+            meta = o.get("metadata") or {}
+            sonuc[o.get("name")] = meta.get("size", meta.get("contentLength"))
+        if len(parca) < 1000:
+            return sonuc
+        atla += 1000
+
+
+def _salt_okunur_hatasi(e):
+    ad = type(e).__name__
+    return "ReadOnly" in ad or "read-only transaction" in str(e)
 
 
 @_yazma
@@ -1568,12 +1795,22 @@ def yedek_al(hedef_yol, onceki_yol=None, ilerleme=None):
             hedef.commit()
 
         # --- Deneme PDF'leri: TEK TEK (hepsini birden belleğe almadan) ---
+        # PDF'ler iki yerde olabilir: veritabanının içinde (eski usul) ya da
+        # dosya deposunda (yeni usul). Yedekte HEPSİ tek yerde, exam_files
+        # tablosunda toplanır -- böylece yedek tek başına, internetsiz
+        # kullanılabilir.
         try:
-            bilgiler = [dict(r) for r in kaynak.execute(
-                "SELECT exam_id, filename, boyut, created_at FROM exam_files "
-                "ORDER BY exam_id").fetchall()]
+            bilgiler = {r["exam_id"]: dict(r, yer="veritabani") for r in kaynak.execute(
+                "SELECT exam_id, filename, boyut, created_at FROM exam_files").fetchall()}
         except Exception:
-            bilgiler = []
+            bilgiler = {}
+        try:
+            for r in kaynak.execute(
+                    "SELECT exam_id, filename, yol, boyut, created_at FROM pdf_depo").fetchall():
+                bilgiler[r["exam_id"]] = dict(r, yer="depo")
+        except Exception:
+            pass
+        bilgiler = [bilgiler[k] for k in sorted(bilgiler)]
         for sira, b in enumerate(bilgiler, start=1):
             if ilerleme:
                 ilerleme(sira, len(bilgiler), b["filename"])
@@ -1590,6 +1827,13 @@ def yedek_al(hedef_yol, onceki_yol=None, ilerleme=None):
                         rapor["pdf_eskiden"] += 1
                 except Exception:
                     veri = None
+            if veri is None and b["yer"] == "depo":
+                veri = depo_indir(b["yol"]) if depo_hazir_mi() else None
+                if veri is None:
+                    raise RuntimeError(
+                        f"'{b['filename']}' dosya deposundan indirilemedi "
+                        f"(SUPABASE_KEY ayarlı mı?)")
+                rapor["pdf_indirilen"] += 1
             if veri is None:
                 r = kaynak.execute(
                     "SELECT data FROM exam_files WHERE exam_id = ?", (b["exam_id"],)
