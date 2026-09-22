@@ -22,7 +22,7 @@ from datetime import datetime
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lgs_platform.db")
 
 # Dosya surumu -- app.py bunu okuyup "hepsi ayni surumde mi" diye bakar.
-SURUM = "2026-09-02.5"
+SURUM = "2026-09-22.1"
 
 DEFAULT_CATEGORIES = [
     "8. Sınıf (LGS)",
@@ -356,7 +356,23 @@ def _insert_id(c, sql, params):
 
 @_yazma
 def init_db():
-    conn = get_conn()
+    _sema_kur(get_conn())
+
+    # Eski kurulumlarda bozuk yazımla ("EMİR" -> "emi̇r") kaydedilmiş
+    # kullanıcı adlarını yeni standarda taşı. Düzeltilecek bir şey yoksa
+    # hiçbir maliyeti yok.
+    try:
+        kullanici_adlarini_duzelt()
+    except Exception:
+        pass
+
+
+def _sema_kur(conn):
+    """Tüm tabloları verilen bağlantıda kurar (yoksa) ve bağlantıyı kapatır.
+
+    Ayrı bir fonksiyon olmasının sebebi YEDEK: yedek dosyası, programın
+    kendi veritabanıyla BİREBİR aynı yapıda kurulsun ki gerektiğinde
+    doğrudan onunla çalışılabilsin (bkz. yedek_al)."""
     c = conn.cursor()
     c.execute(
         """CREATE TABLE IF NOT EXISTS exams (
@@ -492,14 +508,6 @@ def init_db():
 
     conn.commit()
     conn.close()
-
-    # Eski kurulumlarda bozuk yazımla ("EMİR" -> "emi̇r") kaydedilmiş
-    # kullanıcı adlarını yeni standarda taşı. Düzeltilecek bir şey yoksa
-    # hiçbir maliyeti yok.
-    try:
-        kullanici_adlarini_duzelt()
-    except Exception:
-        pass
 
 
 # ---------- students (şifreli öğrenci hesapları) ----------
@@ -1481,3 +1489,166 @@ def oturum_jetonu_coz(jeton):
     if not row:
         return None, None
     return rol, dict(row)
+
+
+# =====================================================================
+#  YEDEK - TÜM VERİLERİN BİLGİSAYARDAKİ BİR DOSYAYA KOPYASI
+#
+#  NEDEN: Veriler (öğrenci hesapları, sınav sonuçları, cevap anahtarları,
+#  deneme PDF'leri) internetteki veritabanında (Supabase) duruyor. Program
+#  klasöründe bunların güncel bir kopyası YOKTU; eski lgs_platform.db
+#  dosyası Supabase'e geçilmeden önceki hâliydi. Supabase'e bir şey olsa
+#  (ücretsiz proje uzun süre kullanılmayıp silinse, hesap kapansa...)
+#  veriler kaybolurdu.
+#
+#  Bu fonksiyon her şeyi, programın kendi veritabanıyla BİREBİR AYNI
+#  yapıda tek bir dosyaya yazar. Gerekirse o dosya lgs_platform.db adıyla
+#  program klasörüne konup programın doğrudan onunla (internet
+#  veritabanı olmadan) çalışması sağlanabilir.
+#
+#  HIZ: Deneme PDF'leri verinin büyük kısmı. Bir önceki yedek verilirse,
+#  DEĞİŞMEMİŞ PDF'ler internetten tekrar indirilmez, eski yedekten
+#  kopyalanır; haftalık yedek bu yüzden birkaç saniye sürer.
+# =====================================================================
+YEDEK_TABLOLARI = ("categories", "exams", "results", "students", "admins",
+                   "in_progress", "settings")
+
+
+def yedek_al(hedef_yol, onceki_yol=None, ilerleme=None):
+    """Tüm veritabanını hedef_yol'daki bir SQLite dosyasına yedekler.
+
+    onceki_yol: bir önceki yedek (varsa değişmeyen PDF'ler oradan alınır)
+    ilerleme:   ilerleme(sira, toplam, ad) şeklinde çağrılır (isteğe bağlı)
+    Döner: {"tablolar": {tablo: satir_sayisi}, "pdf": adet,
+            "pdf_indirilen": adet, "pdf_eskiden": adet, "boyut": bayt}
+    Yarıda kalırsa hedef_yol'a HİÇ dokunulmaz (önce geçici dosyaya yazılır)."""
+    gecici = hedef_yol + ".yarim"
+    if os.path.exists(gecici):
+        os.remove(gecici)
+    os.makedirs(os.path.dirname(os.path.abspath(hedef_yol)), exist_ok=True)
+
+    # Veritabanı zaten bilgisayardaki dosyaysa: doğrudan kopyala.
+    if not _db_url():
+        kaynak = sqlite3.connect(DB_PATH)
+        hedef = sqlite3.connect(gecici)
+        kaynak.backup(hedef)
+        kaynak.close()
+        hedef.close()
+        os.replace(gecici, hedef_yol)
+        return _yedek_ozeti(hedef_yol)
+
+    kaynak = get_conn()
+    _sema_kur(sqlite3.connect(gecici))          # aynı tablo yapısı
+    hedef = sqlite3.connect(gecici)
+    hedef.execute("DELETE FROM categories")     # varsayılanlar yerine gerçekleri
+    onceki = None
+    if onceki_yol and os.path.exists(onceki_yol):
+        try:
+            onceki = sqlite3.connect(onceki_yol)
+        except Exception:
+            onceki = None
+    rapor = {"tablolar": {}, "pdf": 0, "pdf_indirilen": 0, "pdf_eskiden": 0}
+    try:
+        for tablo in YEDEK_TABLOLARI:
+            hedef_sutunlar = [r[1] for r in hedef.execute(f"PRAGMA table_info({tablo})")]
+            try:
+                satirlar = kaynak.execute(f"SELECT * FROM {tablo}").fetchall()
+            except Exception:
+                rapor["tablolar"][tablo] = 0     # eski kurulumlarda olmayabilir
+                continue
+            for satir in satirlar:
+                satir = dict(satir)
+                sutunlar = [s for s in hedef_sutunlar if s in satir]
+                hedef.execute(
+                    f"INSERT OR REPLACE INTO {tablo} ({', '.join(sutunlar)}) "
+                    f"VALUES ({', '.join('?' for _ in sutunlar)})",
+                    [satir[s] for s in sutunlar],
+                )
+            rapor["tablolar"][tablo] = len(satirlar)
+            hedef.commit()
+
+        # --- Deneme PDF'leri: TEK TEK (hepsini birden belleğe almadan) ---
+        try:
+            bilgiler = [dict(r) for r in kaynak.execute(
+                "SELECT exam_id, filename, boyut, created_at FROM exam_files "
+                "ORDER BY exam_id").fetchall()]
+        except Exception:
+            bilgiler = []
+        for sira, b in enumerate(bilgiler, start=1):
+            if ilerleme:
+                ilerleme(sira, len(bilgiler), b["filename"])
+            veri = None
+            if onceki is not None:
+                try:
+                    r = onceki.execute(
+                        "SELECT data FROM exam_files WHERE exam_id = ? AND filename = ? "
+                        "AND boyut = ? AND created_at = ?",
+                        (b["exam_id"], b["filename"], b["boyut"], b["created_at"]),
+                    ).fetchone()
+                    if r and r[0] is not None and len(r[0]) == b["boyut"]:
+                        veri = r[0]
+                        rapor["pdf_eskiden"] += 1
+                except Exception:
+                    veri = None
+            if veri is None:
+                r = kaynak.execute(
+                    "SELECT data FROM exam_files WHERE exam_id = ?", (b["exam_id"],)
+                ).fetchone()
+                if not r:
+                    continue
+                veri = bytes(dict(r)["data"])
+                rapor["pdf_indirilen"] += 1
+            hedef.execute(
+                "INSERT OR REPLACE INTO exam_files (exam_id, filename, data, boyut, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (b["exam_id"], b["filename"], sqlite3.Binary(bytes(veri)),
+                 b["boyut"], b["created_at"]),
+            )
+            rapor["pdf"] += 1
+            if sira % 10 == 0:
+                hedef.commit()
+        hedef.commit()
+
+        # Dosya sağlam mı? Değilse yarım yedeği asıl yedeğin yerine KOYMA.
+        durum = hedef.execute("PRAGMA integrity_check").fetchone()[0]
+        if durum != "ok":
+            raise RuntimeError(f"Yedek dosyası doğrulanamadı: {durum}")
+    except Exception:
+        hedef.close()
+        try:
+            os.remove(gecici)       # yarım kalan dosya ortada kalmasın
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            hedef.close()
+        except Exception:
+            pass
+        if onceki is not None:
+            onceki.close()
+        kaynak.close()
+    os.replace(gecici, hedef_yol)
+    rapor["boyut"] = os.path.getsize(hedef_yol)
+    return rapor
+
+
+def _yedek_ozeti(yol):
+    """Bir yedek dosyasındaki tablo satır sayıları (kontrol için)."""
+    b = sqlite3.connect(yol)
+    try:
+        rapor = {"tablolar": {}, "pdf": 0, "pdf_indirilen": 0, "pdf_eskiden": 0}
+        for tablo in YEDEK_TABLOLARI:
+            try:
+                rapor["tablolar"][tablo] = b.execute(
+                    f"SELECT COUNT(*) FROM {tablo}").fetchone()[0]
+            except Exception:
+                rapor["tablolar"][tablo] = 0
+        try:
+            rapor["pdf"] = b.execute("SELECT COUNT(*) FROM exam_files").fetchone()[0]
+        except Exception:
+            pass
+    finally:
+        b.close()
+    rapor["boyut"] = os.path.getsize(yol)
+    return rapor

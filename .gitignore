@@ -17,6 +17,8 @@ secrets.toml
 *.sqlite
 *.sqlite3
 lgs_platform.db
+# Otomatik yedekler (YEDEK_AL.bat) - icinde ogrenci bilgileri var
+yedekler/
 
 # --- CEVAP ANAHTARLI PDF'LER --- Öğrencinin görmemesi gereken orijinal
 # kitapçıklar. (Zaten uygulama bunları "static" dışında saklıyor.)
