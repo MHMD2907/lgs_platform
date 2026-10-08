@@ -1,8 +1,12 @@
 name: Veritabanini canli tut
 
+# Supabase ucretsiz projeyi "yeterli kullanim" olmazsa uykuya aliyor.
+# Belgesi "her gun birkac sorgu" istiyor; bu yuzden GUNDE IKI KEZ calisir
+# ve her seferinde birkac okuma sorgusu yapar. Hicbir veriyi DEGISTIRMEZ.
 on:
   schedule:
-    - cron: "0 6 */3 * *"   # 3 gunde bir, Turkiye saatiyle 09:00
+    - cron: "17 5 * * *"    # her gun 08:17 (Turkiye saati)
+    - cron: "47 16 * * *"   # her gun 19:47 (Turkiye saati)
   workflow_dispatch:        # "Run workflow" dugmesiyle elle de calisir
 
 permissions:
@@ -11,9 +15,14 @@ permissions:
 
 jobs:
   canli-tut:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - name: Veritabanina kucuk bir okuma sorgusu gonder
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Veritabanina okuma sorgulari gonder
         env:
           DB_URL: ${{ secrets.DB_URL }}
         run: |
@@ -23,11 +32,25 @@ jobs:
           fi
           pip install --quiet "psycopg[binary]"
           python - <<'EOF'
-          import os, psycopg
-          with psycopg.connect(os.environ["DB_URL"], connect_timeout=20,
-                               prepare_threshold=None) as baglanti:
-              adet = baglanti.execute("SELECT COUNT(*) FROM exams").fetchone()[0]
-          print(f"Veritabani ayakta: {adet} deneme kayitli.")
+          import os, time, psycopg
+          son_hata = None
+          for deneme in range(5):
+              try:
+                  with psycopg.connect(os.environ["DB_URL"], connect_timeout=30,
+                                       prepare_threshold=None) as b:
+                      sinav = b.execute("SELECT COUNT(*) FROM exams").fetchone()[0]
+                      ogrenci = b.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+                      sonuc = b.execute("SELECT COUNT(*) FROM results").fetchone()[0]
+                  print(f"Veritabani ayakta: {sinav} deneme, {ogrenci} ogrenci, {sonuc} sonuc.")
+                  break
+              except Exception as e:
+                  son_hata = e
+                  print(f"Deneme {deneme + 1} basarisiz ({type(e).__name__}); 30 sn sonra tekrar.")
+                  time.sleep(30)
+          else:
+              raise SystemExit(
+                  f"Veritabanina ulasilamadi ({type(son_hata).__name__}). "
+                  "Supabase panelinde proje 'Paused' olabilir: Resume project'e basin.")
           EOF
 
       # GitHub, 60 gun yeni yukleme olmazsa zamanlanmis isleri durduruyor;
